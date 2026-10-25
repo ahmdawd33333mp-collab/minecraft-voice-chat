@@ -36,7 +36,7 @@ import androidx.core.app.NotificationCompat
  *   capture and playback. Reconnecting is a fresh session; the relay
  *   drops group membership on close, so the player must re-join a group.
  */
-class VoiceService : Service(), RelayClient.Listener {
+class VoiceService : Service() {
 
     companion object {
         const val CHANNEL_ID = "voicechat"
