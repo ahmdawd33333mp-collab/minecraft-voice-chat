@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: minecraft-voice-relay
+    runtime: docker
+    dockerfilePath: ./hf-space/Dockerfile
+    dockerContext: ./hf-space
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: 10000
