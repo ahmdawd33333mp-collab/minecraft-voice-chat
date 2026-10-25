@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Main screen: name + relay URL on top, mic button big at bottom-centre. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="VoiceChat pilot"
+        android:textSize="22sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="Your name (only thing you enter, no game login):" />
+
+    <EditText
+        android:id="@+id/nameField"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="ahmd"
+        android:inputType="textPersonName" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="Relay server URL:" />
+
+    <EditText
+        android:id="@+id/urlField"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="ws://"
+        android:inputType="textUri" />
+
+    <Button
+        android:id="@+id/connectButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Connect" />
+
+    <Button
+        android:id="@+id/codeButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Get verify code (then type /voice CODE in game)" />
+
+    <TextView
+        android:id="@+id/codeText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="No verify code yet." />
+
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Not connected." />
+
+    <TextView
+        android:id="@+id/speakingText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Speaking: -" />
+
+    <Switch
+        android:id="@+id/autoSenseSwitch"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="Auto-sense Minecraft (auto-connect + auto-mic)" />
+
+    <Button
+        android:id="@+id/permissionsButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Permissions (mic + usage access)" />
+
+    <Button
+        android:id="@+id/batteryButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Battery settings (if the service gets killed)" />
+
+    <!-- Big mic button, bottom-centre. Tap = mute/unmute, long-press = groups. -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:gravity="bottom|center_horizontal">
+
+        <Button
+            android:id="@+id/micButton"
+            android:layout_width="180dp"
+            android:layout_height="180dp"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginBottom="16dp"
+            android:text="MIC ON&#10;Tap to mute"
+            android:textSize="18sp" />
+    </FrameLayout>
+
+</LinearLayout>
