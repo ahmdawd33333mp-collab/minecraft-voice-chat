@@ -16,14 +16,12 @@
 //   Bedrock packs play only pre-bundled sounds; live voice capture
 //   and playback live in the Android app only. Any claim otherwise
 //   would be false, and this pack makes no such claim.
-// - Mute state: in relay v1, mute is stored on the APP session, and
-//   the relay does not push mute state to pack sockets. So the pack
-//   cannot reliably show another player's mute state from the relay
-//   in v1. What works in v1: a muted app session's audio is simply
-//   not forwarded by the relay. A true in-game mute button would need
-//   a relay change (broadcast mute to the linked pack session) —
-//   that change is NOT in this pilot, because relay/server.js must
-//   not be modified.
+// - Mute: relay v2. /voice mute and /voice unmute in game chat send a
+//   mute message on this player's pack socket; the relay applies it to
+//   the LINKED app session (the one sending audio) and tells the app via
+//   mute_ok, so the app's mic button stays in sync. Bedrock packs cannot
+//   draw a HUD mic button, so the in-game control is these chat commands
+//   — there is no in-game button in v2, by platform limitation, not by choice.
 //
 // FALIX FALLBACK — important, do not skip:
 // The pack-to-relay link is UNTESTED on Falix. If the Falix panel
@@ -93,6 +91,9 @@ async function connectPlayer(player) {
                         if (msg.type === "speaking" && msg.from) {
                             player.onScreenDisplay.setActionBar(`Speaking: ${msg.from}`);
                         }
+                        if (msg.type === "mute_ok") {
+                            player.sendMessage(`VoiceChat: mic ${msg.muted ? "muted" : "unmuted"} (relay confirmed).`);
+                        }
                     } catch {
                         // Binary audio frames and non-JSON frames are ignored:
                         // the pack never plays live voice.
@@ -153,6 +154,20 @@ world.beforeEvents.chatSend.subscribe((event) => {
     event.cancel = true;
     const player = event.sender;
     const parts = message.split(/\s+/);
+    if (parts.length === 2 && (parts[1] === "mute" || parts[1] === "unmute")) {
+        const muted = parts[1] === "mute";
+        const doMute = () => {
+            const ok = sendJson(player.name, { type: "mute", muted: muted });
+            player.sendMessage(
+                ok
+                    ? `VoiceChat: ${muted ? "mute" : "unmute"} command sent to the relay.`
+                    : "VoiceChat: relay not connected yet, try again in a few seconds."
+            );
+        };
+        if (sockets.has(player.name)) doMute();
+        else connectPlayer(player).then(doMute);
+        return;
+    }
     if (parts.length === 2 && parts[1] === "status") {
         player.sendMessage(
             `VoiceChat: relay socket ${sockets.has(player.name) ? "connected" : "NOT connected"} for ${player.name}.`
@@ -160,7 +175,7 @@ world.beforeEvents.chatSend.subscribe((event) => {
         return;
     }
     if (parts.length !== 2 || !/^\d{6}$/.test(parts[1])) {
-        player.sendMessage("VoiceChat usage: /voice <6-digit code>  (get the code from the app first)");
+        player.sendMessage("VoiceChat usage: /voice <6-digit code> | /voice mute | /voice unmute | /voice status");
         return;
     }
     const code = parts[1];
