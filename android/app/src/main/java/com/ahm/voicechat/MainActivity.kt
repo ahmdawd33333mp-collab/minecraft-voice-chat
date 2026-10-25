@@ -58,6 +58,9 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
     private lateinit var micButton: Button
     private lateinit var autoSenseSwitch: Switch
 
+    // Relay address is embedded in the app: the player enters ONLY a name.
+    private val embeddedRelayUrl = "wss://minecraft-voice-relay.onrender.com"
+
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             service = (binder as VoiceService.LocalBinder).service()
@@ -85,8 +88,8 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
         autoSenseSwitch = findViewById(R.id.autoSenseSwitch)
 
         nameField.setText(prefs.getString("name", ""))
-        val savedUrl = prefs.getString("url", "wss://minecraft-voice-relay.onrender.com")
-        urlField.setText(if (savedUrl.isNullOrEmpty() || savedUrl == "ws://") "wss://minecraft-voice-relay.onrender.com" else savedUrl)
+        urlField.setText(embeddedRelayUrl)
+        urlField.visibility = View.GONE
         autoSenseSwitch.isChecked = prefs.getBoolean("autosense", true)
         VoiceService.autoSenseEnabled = autoSenseSwitch.isChecked
         VoiceService.micPermissionGranted = hasMicPermission()
@@ -146,16 +149,16 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
 
     private fun onConnectClicked() {
         val name = nameField.text.toString().trim()
-        val url = urlField.text.toString().trim()
-        if (name.isEmpty() || url.isEmpty() || url == "ws://") {
-            Toast.makeText(this, "Enter a name and a relay URL first", Toast.LENGTH_SHORT).show()
+        val url = embeddedRelayUrl
+        if (name.isEmpty()) {
+            Toast.makeText(this, "Enter your name first", Toast.LENGTH_SHORT).show()
             return
         }
         prefs.edit().putString("name", name).putString("url", url).apply()
         VoiceService.savedName = name
         VoiceService.savedUrl = url
         service?.connect(name, url)
-        setStatus("Connecting to $url as $name...")
+        setStatus("Connecting as $name...")
     }
 
     private fun explainAndRequestPermissions() {
