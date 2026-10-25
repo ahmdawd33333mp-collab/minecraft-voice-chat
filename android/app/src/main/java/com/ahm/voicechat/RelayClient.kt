@@ -6,6 +6,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
+import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
 
 /**
@@ -116,7 +117,7 @@ class RelayClient(private val listener: Listener) {
     }
 
     fun sendAudio(bytes: ByteArray, length: Int) {
-        try { ws?.send(ByteString.of(bytes, 0, length)) } catch (_: Exception) { }
+        try { ws?.send(bytes.toByteString(0, length)) } catch (_: Exception) { }
     }
 
     fun requestCode() = sendJson(JSONObject().apply { put("type", "request_code") })
