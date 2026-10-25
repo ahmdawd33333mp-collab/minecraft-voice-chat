@@ -17,7 +17,7 @@
 
 import { createHash } from "node:crypto";
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 7860);
 const PROXIMITY = 15; // blocks, like the Java mod default
 
 const clients = new Map(); // ws -> session
