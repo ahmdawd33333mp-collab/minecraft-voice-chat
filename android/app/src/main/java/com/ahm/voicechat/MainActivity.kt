@@ -85,7 +85,8 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
         autoSenseSwitch = findViewById(R.id.autoSenseSwitch)
 
         nameField.setText(prefs.getString("name", ""))
-        urlField.setText(prefs.getString("url", "ws://"))
+        val savedUrl = prefs.getString("url", "wss://minecraft-voice-relay.onrender.com")
+        urlField.setText(if (savedUrl.isNullOrEmpty() || savedUrl == "ws://") "wss://minecraft-voice-relay.onrender.com" else savedUrl)
         autoSenseSwitch.isChecked = prefs.getBoolean("autosense", true)
         VoiceService.autoSenseEnabled = autoSenseSwitch.isChecked
         VoiceService.micPermissionGranted = hasMicPermission()
