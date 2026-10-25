@@ -43,7 +43,7 @@ import { websocket } from "@minecraft/server-net";
 
 // EDIT THIS before uploading the pack: the relay's WebSocket address,
 // for example "ws://your-relay-host:3000". No password or token here.
-const RELAY_URL = "ws://REPLACE-WITH-YOUR-RELAY-URL";
+const RELAY_URL = "wss://minecraft-voice-relay.onrender.com";
 
 // One relay socket per in-game player. The relay stores position on
 // the socket session, so sharing one socket for all players would
