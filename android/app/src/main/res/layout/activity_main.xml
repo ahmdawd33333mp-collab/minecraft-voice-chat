@@ -1,98 +1,121 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Main screen: name + relay URL on top, mic button big at bottom-centre. -->
+<!-- App v3: one big centred name field, connect, copyable chat command, range. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="16dp">
+    android:gravity="center_horizontal"
+    android:padding="24dp">
 
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="VoiceChat pilot"
-        android:textSize="22sp"
+        android:layout_marginTop="48dp"
+        android:text="VoiceChat"
+        android:textSize="28sp"
         android:textStyle="bold" />
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:text="Your name (only thing you enter, no game login):" />
 
     <EditText
         android:id="@+id/nameField"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="ahmd"
+        android:layout_height="72dp"
+        android:layout_marginTop="40dp"
+        android:gravity="center"
+        android:hint="اكتب اسمك"
+        android:textSize="24sp"
         android:inputType="textPersonName" />
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:text="Relay server URL:" />
-
-    <EditText
-        android:id="@+id/urlField"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="ws://"
-        android:inputType="textUri" />
 
     <Button
         android:id="@+id/connectButton"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="Connect" />
-
-    <Button
-        android:id="@+id/codeButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Get verify code (then type /voice CODE in game)" />
-
-    <TextView
-        android:id="@+id/codeText"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="No verify code yet." />
+        android:layout_height="64dp"
+        android:layout_marginTop="16dp"
+        android:text="اتصال"
+        android:textSize="20sp" />
 
     <TextView
         android:id="@+id/statusText"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="Not connected." />
+        android:layout_marginTop="16dp"
+        android:text="غير متصل"
+        android:textSize="16sp" />
+
+    <!-- Shown after connecting: what to type in game chat, copyable. -->
+    <LinearLayout
+        android:id="@+id/commandSection"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:gravity="center_horizontal"
+        android:visibility="gone"
+        android:layout_marginTop="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="يرجى كتابة اسمك بالشات"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/commandText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="/ahmdawd3"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/copyButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="نسخ الأمر" />
+    </LinearLayout>
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:text="كم بلوك بدك يسمعوك الآخرين؟"
+        android:textSize="16sp" />
+
+    <Spinner
+        android:id="@+id/rangeSpinner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp" />
 
     <TextView
         android:id="@+id/speakingText"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Speaking: -" />
+        android:layout_marginTop="16dp"
+        android:text="يتكلم الآن: -" />
 
     <Switch
         android:id="@+id/autoSenseSwitch"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:text="Auto-sense Minecraft (auto-connect + auto-mic)" />
+        android:layout_marginTop="16dp"
+        android:text="تشغيل تلقائي مع ماينكرافت" />
 
     <Button
         android:id="@+id/permissionsButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
-        android:text="Permissions (mic + usage access)" />
+        android:text="الأذونات (مايك + الوصول للاستخدام)" />
 
     <Button
         android:id="@+id/batteryButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Battery settings (if the service gets killed)" />
+        android:text="إعدادات البطارية (إذا توقفت الخدمة)" />
 
-    <!-- Big mic button, bottom-centre. Tap = mute/unmute, long-press = groups. -->
+    <!-- Mic button, bottom-centre. Tap = mute/unmute, long-press = groups. -->
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
@@ -105,7 +128,7 @@
             android:layout_height="180dp"
             android:layout_gravity="bottom|center_horizontal"
             android:layout_marginBottom="16dp"
-            android:text="MIC ON&#10;Tap to mute"
+            android:text="MIC ON&#10;اضغط للكتم"
             android:textSize="18sp" />
     </FrameLayout>
 
