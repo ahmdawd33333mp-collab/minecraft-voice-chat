@@ -1,16 +1,19 @@
-// Minecraft proximity voice relay - pilot v2
+// Minecraft proximity voice relay - pilot v3
 // Runtime: Bun. Protocol: JSON text messages, plus binary audio frames.
 // Audio is opaque: the relay never decodes it. It forwards a frame only to
 // recipients allowed by the rules below, with a `from` name attached.
 // Rules, in order:
 //  1. Sender muted -> nobody receives.
 //  2. Sender in a group -> only group members receive, any distance, any dimension.
-//  3. Otherwise -> only players in the same dimension within PROXIMITY blocks receive.
-// Identity: a player enters only a name in the app. The game pack links that
-// name to an in-game player with a one-time verify code:
-//   app sends {type:"request_code"} -> server returns {type:"code", code:"123456"}
-//   player types /voice <code> in game -> pack sends {type:"verify", code, player}
-//   server links the app session to that in-game player name for position routing.
+//  3. Otherwise -> only players in the same dimension within the SENDER's
+//     chosen range receive (range is per app session, default 15, the app
+//     lets the player pick 20/30/50/100/200/500/1000/2000).
+// Identity v3 (no code needed): a player enters only a name in the app.
+// In game he types a single command that is his own name, e.g. /ahmdawd3.
+// The pack sends {type:"link_by_name", player}; the relay links the app
+// session whose name matches that player (case-insensitive) to the pack
+// socket, so positions route to the app session. The old /voice <code>
+// verify path is kept as a fallback.
 // Positions come from the pack (authoritative). The app never invents a position.
 // v2 fixes (2026-10-25): an app session's position is taken from its LINKED pack
 // socket (same player name), because the app itself sends no position — without
@@ -22,7 +25,7 @@
 import { createHash } from "node:crypto";
 
 const PORT = Number(process.env.PORT || 7860);
-const PROXIMITY = 15; // blocks, like the Java mod default
+const DEFAULT_PROXIMITY = 15; // blocks, like the Java mod default
 
 const clients = new Map(); // ws -> session
 const groups = new Map(); // groupName -> { passwordHash, members:Set<ws> }
@@ -33,6 +36,11 @@ function hashPassword(pw) {
 }
 function send(ws, obj) {
   try { ws.send(JSON.stringify(obj)); } catch {}
+}
+function clampRange(v) {
+  const n = Math.floor(Number(v));
+  if (!Number.isFinite(n)) return DEFAULT_PROXIMITY;
+  return Math.min(2000, Math.max(1, n));
 }
 function distance(a, b) {
   const dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
@@ -52,6 +60,7 @@ function effectivePos(s) {
 function recipientsFor(sender) {
   const out = [];
   const senderPos = effectivePos(sender);
+  const range = sender.range || DEFAULT_PROXIMITY;
   for (const [ws, s] of clients) {
     if (ws === sender.ws) continue;
     if (!s.name) continue;
@@ -63,7 +72,7 @@ function recipientsFor(sender) {
     const targetPos = effectivePos(s);
     if (!senderPos || !targetPos) continue;
     if (senderPos.dimension !== targetPos.dimension) continue;
-    if (distance(senderPos, targetPos) <= PROXIMITY) out.push(ws);
+    if (distance(senderPos, targetPos) <= range) out.push(ws);
   }
   return out;
 }
@@ -76,7 +85,7 @@ const server = Bun.serve({
   },
   websocket: {
     open(ws) {
-      clients.set(ws, { ws, name: null, player: null, pos: null, muted: false, group: null, appWs: null, packWs: null });
+      clients.set(ws, { ws, name: null, player: null, pos: null, muted: false, group: null, appWs: null, packWs: null, isPack: false, range: DEFAULT_PROXIMITY });
     },
     message(ws, message) {
       const s = clients.get(ws);
@@ -95,21 +104,46 @@ const server = Bun.serve({
       try { msg = JSON.parse(String(message)); } catch { return; }
       if (msg.type === "hello") {
         s.name = String(msg.name || "").slice(0, 32);
-        send(ws, { type: "hello_ok", name: s.name, proximity: PROXIMITY });
+        if (msg.range !== undefined) s.range = clampRange(msg.range);
+        send(ws, { type: "hello_ok", name: s.name, proximity: s.range });
+      } else if (msg.type === "range") {
+        s.range = clampRange(msg.range);
+        send(ws, { type: "range_ok", range: s.range });
       } else if (msg.type === "request_code") {
         const code = String(Math.floor(100000 + Math.random() * 900000));
         codes.set(code, ws);
         send(ws, { type: "code", code });
+      } else if (msg.type === "link_by_name") {
+        // Sent by the game pack when the player types /<own name> in chat.
+        // Link the app session with the same name (not a pack socket) to
+        // this pack socket, so positions route to the app session.
+        const player = String(msg.player || "");
+        s.isPack = true;
+        let appWs = null;
+        for (const [otherWs, other] of clients) {
+          if (otherWs === ws) continue;
+          if (!other.name) continue;
+          if (other.isPack) continue;
+          if (other.name.toLowerCase() === player.toLowerCase()) { appWs = otherWs; break; }
+        }
+        if (!appWs) { send(ws, { type: "link_ok", ok: false, reason: "no_app_with_that_name" }); return; }
+        const app = clients.get(appWs);
+        if (app) { app.player = player; app.packWs = ws; }
+        s.appWs = appWs;
+        send(ws, { type: "link_ok", ok: true, player });
+        send(appWs, { type: "linked", player });
       } else if (msg.type === "verify") {
-        // Sent by the game pack, not by the app: {code, player}
+        // Fallback, sent by the game pack: {code, player}
         const appWs = codes.get(String(msg.code));
         if (!appWs) { send(ws, { type: "verify_ok", ok: false, reason: "bad_code" }); return; }
         const app = clients.get(appWs);
+        s.isPack = true;
         if (app) { app.player = String(msg.player || ""); app.packWs = ws; s.appWs = appWs; }
         codes.delete(String(msg.code));
         send(ws, { type: "verify_ok", ok: true, player: String(msg.player || "") });
         send(appWs, { type: "verified", player: String(msg.player || "") });
       } else if (msg.type === "position") {
+        s.isPack = true;
         s.pos = { x: Number(msg.x), y: Number(msg.y), z: Number(msg.z), dimension: String(msg.dimension || "overworld") };
       } else if (msg.type === "mute") {
         // A mute from a linked pack socket (/voice mute in game) mutes the
@@ -154,4 +188,4 @@ const server = Bun.serve({
   },
 });
 
-console.log(`relay listening on ${PORT}, proximity ${PROXIMITY} blocks`);
+console.log(`relay listening on ${PORT}, default proximity ${DEFAULT_PROXIMITY} blocks`);
