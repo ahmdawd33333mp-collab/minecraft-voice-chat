@@ -29,7 +29,14 @@
 //   notification action (Mute / Unmute) in the notification shade.
 
 import { world, system } from "@minecraft/server";
-import { websocket } from "@minecraft/server-net";
+// Namespace import on purpose: if a future server-net build renames
+// the `websocket` export, the whole script must NOT die at import time.
+// With a namespace import, a missing export only breaks relay connect
+// (caught in connectPlayer), while chat commands and the welcome
+// message still work — so a relay problem can never again look like
+// "the pack does not load at all".
+import * as serverNet from "@minecraft/server-net";
+const websocket = serverNet.websocket;
 
 // EDIT THIS before uploading the pack: the relay's WebSocket address,
 // for example "ws://your-relay-host:3000". No password or token here.
@@ -61,6 +68,10 @@ function sendJson(playerName, obj) {
 
 async function connectPlayer(player) {
     if (sockets.has(player.name)) return;
+    if (!websocket || typeof websocket.connect !== "function") {
+        console.warn("VoiceChat: server-net websocket export is unavailable on this build; relay connect skipped, chat commands still work.");
+        return;
+    }
     try {
         const client = await websocket.connect(RELAY_URL);
         sockets.set(player.name, client);
@@ -139,6 +150,13 @@ system.runInterval(() => {
 
 world.afterEvents.playerSpawn.subscribe((event) => {
     connectPlayer(event.player);
+    // Proof-of-life: if the script is running at all, the player sees
+    // this the moment he joins. If he does NOT see it, the script did
+    // not load (Beta APIs / module version / pack activation), and no
+    // chat command can work — that is the diagnostic that matters.
+    try {
+        event.player.sendMessage(`VoiceChat: pack loaded. Type /${event.player.name} to link voice.`);
+    } catch { /* ignore */ }
 });
 
 world.afterEvents.playerLeave.subscribe((event) => {
@@ -151,7 +169,10 @@ world.afterEvents.playerLeave.subscribe((event) => {
 world.beforeEvents.chatSend.subscribe((event) => {
     const message = event.message.trim();
     const player = event.sender;
-    const isOwnNameCommand = message.toLowerCase() === "/" + player.name.toLowerCase();
+    // Plain-word fallback: if slash commands never reach chatSend on
+    // this build, typing just your name (no slash) still links voice.
+    const isOwnNameCommand = message.toLowerCase() === "/" + player.name.toLowerCase()
+        || message.toLowerCase() === player.name.toLowerCase();
     if (isOwnNameCommand || message === "/voice") {
         event.cancel = true;
         const sendLink = () => {
