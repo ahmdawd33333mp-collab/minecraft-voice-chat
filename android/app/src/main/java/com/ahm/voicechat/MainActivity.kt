@@ -2,6 +2,8 @@ package com.ahm.voicechat
 
 import android.Manifest
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -13,8 +15,12 @@ import android.os.Bundle
 import android.os.IBinder
 import android.provider.Settings
 import android.view.View
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
@@ -23,26 +29,20 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 
 /**
- * One app only: voice + microphone together.
+ * App v3: one screen, centred.
+ * - Big field: "اكتب اسمك" (Arabic), then Connect.
+ * - After connecting: "يرجى كتابة اسمك بالشات" + the single in-game
+ *   command (/ + name, e.g. /ahmdawd3) + a Copy button, so the player
+ *   pastes it into Minecraft chat. No verify code anymore.
+ * - Below: range picker — how many blocks others hear you from:
+ *   20, 30, 50, 100, 200, 500, 1000, 2000 (sender range, relay v3).
+ * - Mic button: tap = mute/unmute (long-press = groups, as before).
+ * - Notification actions (Mute / Unmute) work from the shade while
+ *   playing, without leaving Minecraft.
  *
  * The player enters ONLY a name. No game login, no password for the
  * player himself. Group passwords exist only for groups, entered when
  * creating or joining a group (long-press on the mic button).
- *
- * Mic button, bottom-centre:
- *   tap        = mute / unmute (icon text + status line show the state)
- *   long-press = groups (see showGroupsDialog)
- *
- * Permissions, explained in-app before any request:
- * - Microphone: to capture your voice. Without it, you can listen only
- *   after connecting; capture stays off.
- * - Usage access: to auto-sense Minecraft in the foreground. The app
- *   cannot grant this itself; it opens the Settings screen for you.
- * - Notifications / foreground service: Android requires a visible
- *   notification while the mic service runs in the background.
- * - Battery optimisation: if the phone kills the service while playing,
- *   exempt the app in Settings > Battery. The button below opens the
- *   battery settings screen; it does not change anything by itself.
  */
 class MainActivity : AppCompatActivity(), RelayClient.Listener {
 
@@ -51,12 +51,17 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
     private var bound = false
 
     private lateinit var nameField: EditText
-    private lateinit var urlField: EditText
     private lateinit var statusText: TextView
     private lateinit var speakingText: TextView
-    private lateinit var codeText: TextView
+    private lateinit var commandSection: LinearLayout
+    private lateinit var commandText: TextView
     private lateinit var micButton: Button
     private lateinit var autoSenseSwitch: Switch
+    private lateinit var rangeSpinner: Spinner
+
+    private val ranges = listOf(20, 30, 50, 100, 200, 500, 1000, 2000)
+    private var currentRange = 50
+    private var playerName = ""
 
     // Relay address is embedded in the app: the player enters ONLY a name.
     private val embeddedRelayUrl = "wss://minecraft-voice-relay.onrender.com"
@@ -80,22 +85,38 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
         prefs = getSharedPreferences("voicechat", Context.MODE_PRIVATE)
 
         nameField = findViewById(R.id.nameField)
-        urlField = findViewById(R.id.urlField)
         statusText = findViewById(R.id.statusText)
         speakingText = findViewById(R.id.speakingText)
-        codeText = findViewById(R.id.codeText)
+        commandSection = findViewById(R.id.commandSection)
+        commandText = findViewById(R.id.commandText)
         micButton = findViewById(R.id.micButton)
         autoSenseSwitch = findViewById(R.id.autoSenseSwitch)
+        rangeSpinner = findViewById(R.id.rangeSpinner)
 
         nameField.setText(prefs.getString("name", ""))
-        urlField.setText(embeddedRelayUrl)
-        urlField.visibility = View.GONE
+        currentRange = prefs.getInt("range", 50)
+        if (currentRange !in ranges) currentRange = 50
+
+        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item,
+            ranges.map { "$it بلوك" })
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        rangeSpinner.adapter = adapter
+        rangeSpinner.setSelection(ranges.indexOf(currentRange))
+        rangeSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                currentRange = ranges[pos]
+                prefs.edit().putInt("range", currentRange).apply()
+                service?.setRange(currentRange)
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
         autoSenseSwitch.isChecked = prefs.getBoolean("autosense", true)
         VoiceService.autoSenseEnabled = autoSenseSwitch.isChecked
         VoiceService.micPermissionGranted = hasMicPermission()
 
         findViewById<Button>(R.id.connectButton).setOnClickListener { onConnectClicked() }
-        findViewById<Button>(R.id.codeButton).setOnClickListener { service?.requestCode() }
+        findViewById<Button>(R.id.copyButton).setOnClickListener { copyCommand() }
         findViewById<Button>(R.id.permissionsButton).setOnClickListener { explainAndRequestPermissions() }
         findViewById<Button>(R.id.batteryButton).setOnClickListener { openBatterySettings() }
         autoSenseSwitch.setOnCheckedChangeListener { _, checked ->
@@ -149,20 +170,27 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
 
     private fun onConnectClicked() {
         val name = nameField.text.toString().trim()
-        val url = embeddedRelayUrl
         if (name.isEmpty()) {
-            Toast.makeText(this, "Enter your name first", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "اكتب اسمك أولاً", Toast.LENGTH_SHORT).show()
             return
         }
-        prefs.edit().putString("name", name).putString("url", url).apply()
+        playerName = name
+        prefs.edit().putString("name", name).putString("url", embeddedRelayUrl).putInt("range", currentRange).apply()
         VoiceService.savedName = name
-        VoiceService.savedUrl = url
-        service?.connect(name, url)
-        setStatus("Connecting as $name...")
+        VoiceService.savedUrl = embeddedRelayUrl
+        VoiceService.savedRange = currentRange
+        service?.connect(name, embeddedRelayUrl, currentRange)
+        setStatus("جارٍ الاتصال باسم $name...")
+    }
+
+    private fun copyCommand() {
+        val cmd = commandText.text.toString()
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("voice command", cmd))
+        Toast.makeText(this, "تم نسخ الأمر: $cmd", Toast.LENGTH_SHORT).show()
     }
 
     private fun explainAndRequestPermissions() {
-        // Usage access first: it is the one the app cannot grant itself.
         if (!GameWatcher.hasUsageAccess(this)) {
             AlertDialog.Builder(this)
                 .setTitle("Usage access (for auto-sense)")
@@ -191,12 +219,11 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
         if (needed.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, needed.toTypedArray(), 1)
         } else {
-            Toast.makeText(this, "All permissions already granted", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "كل الأذونات ممنوحة", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun openBatterySettings() {
-        // Note only: exempting the app is the user's choice in Settings.
         startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
     }
 
@@ -206,7 +233,6 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
         val svc = service ?: return
         val group = svc.currentGroup
         if (group != null) {
-            // In a group: show Exit next to the player's name.
             val name = nameField.text.toString().trim()
             AlertDialog.Builder(this)
                 .setTitle("Group: $group")
@@ -216,7 +242,6 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
                 .show()
             return
         }
-        // Not in a group: create, or list existing groups to join.
         AlertDialog.Builder(this)
             .setTitle("Groups")
             .setMessage("Create a new group, or join an existing one. Group members hear each other from anywhere, even far apart.")
@@ -277,35 +302,41 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
         runOnUiThread { statusText.text = text }
     }
 
+    private fun showCommandSection() {
+        runOnUiThread {
+            commandText.text = "/$playerName"
+            commandSection.visibility = View.VISIBLE
+        }
+    }
+
     private fun refreshMicButton() {
         runOnUiThread {
             val svc = service
-            micButton.text = if (svc?.muted == true) "MUTED\nTap to unmute" else "MIC ON\nTap to mute"
+            micButton.text = if (svc?.muted == true) "MUTED\nاضغط لإلغاء الكتم" else "MIC ON\nاضغط للكتم"
             micButton.visibility = View.VISIBLE
         }
     }
 
     // ---- RelayClient.Listener (forwarded by VoiceService) ----
 
-    override fun onConnected() = setStatus("Connected. Waiting for hello...")
-    override fun onDisconnected() = setStatus("Disconnected")
+    override fun onConnected() = setStatus("متصل... بانتظار التأكيد")
+    override fun onDisconnected() = setStatus("غير متصل")
     override fun onHelloOk(name: String, proximity: Int) {
-        setStatus("Connected as $name (proximity ${proximity}m blocks)")
+        playerName = name
+        setStatus("متصل باسم $name (المسافة $proximity بلوك)")
+        showCommandSection()
         refreshMicButton()
     }
 
-    override fun onCode(code: String) {
-        runOnUiThread {
-            codeText.text = "Your verify code: $code\nIn Minecraft, type: /voice $code"
-        }
-    }
+    override fun onCode(code: String) {}
+    override fun onVerified(player: String) = setStatus("تم الربط داخل اللعبة باسم $player")
 
-    override fun onVerified(player: String) {
-        setStatus("Verified in-game as $player. Position now comes from the pack.")
+    override fun onLinked(player: String) {
+        setStatus("تم ربط الصوت داخل اللعبة باسم $player — تكلّم الآن")
     }
 
     override fun onMuteOk(muted: Boolean) {
-        setStatus(if (muted) "Muted" else "Unmuted")
+        setStatus(if (muted) "مكتوم" else "غير مكتوم")
         refreshMicButton()
     }
 
@@ -315,7 +346,7 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
 
     override fun onGroupOk(ok: Boolean, group: String?, reason: String?) {
         if (ok) {
-            setStatus(if (group != null) "In group: $group" else "Left group")
+            setStatus(if (group != null) "في المجموعة: $group" else "خرجت من المجموعة")
         } else {
             Toast.makeText(this, "Group failed: ${reason ?: "unknown"}", Toast.LENGTH_SHORT).show()
         }
@@ -323,7 +354,7 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
     }
 
     override fun onSpeaking(from: String) {
-        runOnUiThread { speakingText.text = "Speaking: $from" }
+        runOnUiThread { speakingText.text = "يتكلم الآن: $from" }
     }
 
     override fun onAudio(bytes: ByteArray) {
