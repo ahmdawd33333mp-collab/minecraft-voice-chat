@@ -33,6 +33,7 @@ class RelayClient(private val listener: Listener) {
         fun onHelloOk(name: String, proximity: Int)
         fun onCode(code: String)
         fun onVerified(player: String)
+        fun onLinked(player: String)
         fun onMuteOk(muted: Boolean)
         fun onGroups(groups: List<String>)
         fun onGroupOk(ok: Boolean, group: String?, reason: String?)
@@ -45,7 +46,7 @@ class RelayClient(private val listener: Listener) {
     var isConnected: Boolean = false
         private set
 
-    fun connect(url: String, name: String) {
+    fun connect(url: String, name: String, range: Int = 50) {
         disconnect()
         val request = Request.Builder().url(url).build()
         ws = client.newWebSocket(request, object : WebSocketListener() {
@@ -55,6 +56,7 @@ class RelayClient(private val listener: Listener) {
                 sendJson(JSONObject().apply {
                     put("type", "hello")
                     put("name", name)
+                    put("range", range)
                 })
             }
 
@@ -68,6 +70,7 @@ class RelayClient(private val listener: Listener) {
                         )
                         "code" -> listener.onCode(json.optString("code"))
                         "verified" -> listener.onVerified(json.optString("player"))
+                        "linked" -> listener.onLinked(json.optString("player"))
                         "mute_ok" -> listener.onMuteOk(json.optBoolean("muted"))
                         "groups" -> {
                             val arr = json.optJSONArray("groups")
@@ -121,6 +124,11 @@ class RelayClient(private val listener: Listener) {
     }
 
     fun requestCode() = sendJson(JSONObject().apply { put("type", "request_code") })
+
+    fun setRange(range: Int) = sendJson(JSONObject().apply {
+        put("type", "range")
+        put("range", range)
+    })
 
     fun setMuted(muted: Boolean) = sendJson(JSONObject().apply {
         put("type", "mute")
