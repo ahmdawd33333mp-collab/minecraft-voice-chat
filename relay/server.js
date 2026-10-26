@@ -1,4 +1,4 @@
-// Minecraft proximity voice relay - pilot v3
+// Minecraft proximity voice relay - pilot v4
 // Runtime: Bun. Protocol: JSON text messages, plus binary audio frames.
 // Audio is opaque: the relay never decodes it. It forwards a frame only to
 // recipients allowed by the rules below, with a `from` name attached.
@@ -8,19 +8,17 @@
 //  3. Otherwise -> only players in the same dimension within the SENDER's
 //     chosen range receive (range is per app session, default 15, the app
 //     lets the player pick 20/30/50/100/200/500/1000/2000).
-// Identity v3 (no code needed): a player enters only a name in the app.
-// In game he types a single command that is his own name, e.g. /ahmdawd3.
-// The pack sends {type:"link_by_name", player}; the relay links the app
-// session whose name matches that player (case-insensitive) to the pack
-// socket, so positions route to the app session. The old /voice <code>
-// verify path is kept as a fallback.
+// Identity v4 (automatic, no command): the game pack says hello with
+// pack:true and the in-game player name; the app says hello with the
+// player's entered name. When a pack socket and an app session share
+// the same name (case-insensitive), the relay links them automatically
+// — no chat command, no code. This replaces v3's /<name> command,
+// because Mojang REMOVED world.beforeEvents.chatSend on 1.26.52, so
+// no script can intercept chat commands there at all (proven by the
+// 2026-10-26 console error at old main.js:169). The old link_by_name
+// and /voice <code> verify paths are kept as fallbacks for any pack
+// that still sends them.
 // Positions come from the pack (authoritative). The app never invents a position.
-// v2 fixes (2026-10-25): an app session's position is taken from its LINKED pack
-// socket (same player name), because the app itself sends no position — without
-// this, proximity routing for app audio returned nobody. And a mute sent from a
-// linked pack socket (/voice mute in game) now mutes the linked APP session,
-// which is the session that actually sends audio; the app is told via mute_ok
-// so its mic button stays in sync.
 
 import { createHash } from "node:crypto";
 
@@ -41,6 +39,24 @@ function clampRange(v) {
   const n = Math.floor(Number(v));
   if (!Number.isFinite(n)) return DEFAULT_PROXIMITY;
   return Math.min(2000, Math.max(1, n));
+}
+// Auto-link: a pack socket and an app session with the same name belong
+// to the same player. Link them in either order of arrival, once.
+function tryAutoLink(s) {
+  if (!s.name || s.appWs || s.packWs) return;
+  for (const [otherWs, other] of clients) {
+    if (otherWs === s.ws || !other.name) continue;
+    if (other.name.toLowerCase() !== s.name.toLowerCase()) continue;
+    if (other.isPack === s.isPack) continue;
+    const pack = s.isPack ? s : other;
+    const app = s.isPack ? other : s;
+    app.player = pack.name;
+    app.packWs = pack.ws;
+    pack.appWs = app.ws;
+    send(pack.ws, { type: "link_ok", ok: true, player: pack.name });
+    send(app.ws, { type: "linked", player: pack.name });
+    return;
+  }
 }
 function distance(a, b) {
   const dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
@@ -104,8 +120,10 @@ const server = Bun.serve({
       try { msg = JSON.parse(String(message)); } catch { return; }
       if (msg.type === "hello") {
         s.name = String(msg.name || "").slice(0, 32);
+        if (msg.pack === true) s.isPack = true;
         if (msg.range !== undefined) s.range = clampRange(msg.range);
         send(ws, { type: "hello_ok", name: s.name, proximity: s.range });
+        tryAutoLink(s);
       } else if (msg.type === "range") {
         s.range = clampRange(msg.range);
         send(ws, { type: "range_ok", range: s.range });
@@ -145,6 +163,7 @@ const server = Bun.serve({
       } else if (msg.type === "position") {
         s.isPack = true;
         s.pos = { x: Number(msg.x), y: Number(msg.y), z: Number(msg.z), dimension: String(msg.dimension || "overworld") };
+        tryAutoLink(s);
       } else if (msg.type === "mute") {
         // A mute from a linked pack socket (/voice mute in game) mutes the
         // linked APP session, which is the one sending audio. A mute from
