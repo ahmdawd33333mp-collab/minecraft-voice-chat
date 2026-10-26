@@ -47,6 +47,7 @@ class VoiceService : Service() {
 
         var savedName: String = ""
         var savedUrl: String = ""
+        var savedRange: Int = 50
         var autoSenseEnabled: Boolean = true
         var micPermissionGranted: Boolean = false
     }
@@ -83,6 +84,9 @@ class VoiceService : Service() {
                 stopAll()
                 stopSelf()
             }
+            "MUTE_TOGGLE" -> {
+                setMuted(!muted)
+            }
         }
         return START_STICKY
     }
@@ -94,10 +98,16 @@ class VoiceService : Service() {
 
     // ---- public control, called from MainActivity ----
 
-    fun connect(name: String, url: String) {
+    fun connect(name: String, url: String, range: Int = 50) {
         savedName = name
         savedUrl = url
-        if (!relay.isConnected) relay.connect(url, name)
+        savedRange = range
+        if (!relay.isConnected) relay.connect(url, name, range)
+    }
+
+    fun setRange(range: Int) {
+        savedRange = range
+        if (relay.isConnected) relay.setRange(range)
     }
 
     fun disconnect() {
@@ -125,7 +135,7 @@ class VoiceService : Service() {
         override fun run() {
             if (autoSenseEnabled && savedName.isNotBlank() && savedUrl.isNotBlank() && micPermissionGranted) {
                 if (GameWatcher.isGameForeground(this@VoiceService)) {
-                    if (!relay.isConnected) relay.connect(savedUrl, savedName)
+                    if (!relay.isConnected) relay.connect(savedUrl, savedName, savedRange)
                     if (micPausedByGame) {
                         micPausedByGame = false
                         if (!muted) startCapture()
@@ -229,11 +239,25 @@ class VoiceService : Service() {
     }
 
     private fun buildNotification(text: String): Notification {
+        // Notification actions: usable from the notification shade WHILE
+        // playing, without leaving Minecraft. Tap = mute / unmute.
+        val muteIntent = Intent(this, VoiceService::class.java).apply { action = "MUTE_TOGGLE" }
+        val mutePending = android.app.PendingIntent.getService(
+            this, 1, muteIntent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+        val stopIntent = Intent(this, VoiceService::class.java).apply { action = "STOP" }
+        val stopPending = android.app.PendingIntent.getService(
+            this, 2, stopIntent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("VoiceChat")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
+            .addAction(0, if (muted) "Unmute" else "Mute", mutePending)
+            .addAction(0, "Stop", stopPending)
             .build()
     }
 
@@ -271,6 +295,10 @@ class VoiceService : Service() {
 
         override fun onCode(code: String) = listener?.onCode(code) ?: Unit
         override fun onVerified(player: String) = listener?.onVerified(player) ?: Unit
+        override fun onLinked(player: String) {
+            updateNotification()
+            listener?.onLinked(player) ?: Unit
+        }
 
         override fun onMuteOk(muted: Boolean) {
             this@VoiceService.muted = muted
