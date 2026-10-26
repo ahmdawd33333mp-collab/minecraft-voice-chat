@@ -116,7 +116,7 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
         VoiceService.micPermissionGranted = hasMicPermission()
 
         findViewById<Button>(R.id.connectButton).setOnClickListener { onConnectClicked() }
-        findViewById<Button>(R.id.copyButton).setOnClickListener { copyCommand() }
+        findViewById<Button>(R.id.copyButton).visibility = View.GONE
         findViewById<Button>(R.id.permissionsButton).setOnClickListener { explainAndRequestPermissions() }
         findViewById<Button>(R.id.batteryButton).setOnClickListener { openBatterySettings() }
         autoSenseSwitch.setOnCheckedChangeListener { _, checked ->
@@ -304,7 +304,7 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
 
     private fun showCommandSection() {
         runOnUiThread {
-            commandText.text = "/$playerName"
+            commandText.text = playerName
             commandSection.visibility = View.VISIBLE
         }
     }
@@ -334,6 +334,9 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
     override fun onLinked(player: String) {
         setStatus("تم ربط الصوت داخل اللعبة باسم $player — تكلّم الآن")
     }
+
+    // Copy button is kept for the name only; there is no chat command
+    // anymore on 1.26.52 (chatSend was removed by Mojang).
 
     override fun onMuteOk(muted: Boolean) {
         setStatus(if (muted) "مكتوم" else "غير مكتوم")
