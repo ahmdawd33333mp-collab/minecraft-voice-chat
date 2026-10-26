@@ -1,4 +1,4 @@
-// VoiceChat Behaviour Pack — pilot v1
+// VoiceChat Behaviour Pack — pilot v3
 // Bedrock 1.26.x, Beta APIs, BDS only. @minecraft/server-net is
 // pre-release and only works on Bedrock Dedicated Server, not on the
 // game client and not on Realms.
@@ -7,34 +7,26 @@
 // - DOES track each player's position (x, y, z, dimension) once per
 //   second and send it to the voice relay over a WebSocket opened
 //   with server-net, one socket per player.
-// - DOES handle /voice <code>: it sends {type:"verify", code, player}
-//   to the relay, exactly as relay/server.js expects. The relay then
-//   tells the app session that issued the code that it is verified.
+// - DOES handle the single command /<own name> (e.g. /ahmdawd3): it
+//   sends {type:"link_by_name", player} to relay v3, which links the
+//   app session with the same name to this pack socket — no code.
+//   /voice with no argument does the same thing. The old
+//   /voice <6-digit code> verify path is kept as a fallback.
 // - DOES surface relay messages it receives on a player's socket
 //   (for example a "speaking" notice) as an in-game action bar line.
 // - Does NOT capture microphone audio. Does NOT play live voice.
 //   Bedrock packs play only pre-bundled sounds; live voice capture
 //   and playback live in the Android app only. Any claim otherwise
 //   would be false, and this pack makes no such claim.
-// - Mute: relay v2. /voice mute and /voice unmute in game chat send a
-//   mute message on this player's pack socket; the relay applies it to
-//   the LINKED app session (the one sending audio) and tells the app via
-//   mute_ok, so the app's mic button stays in sync. Bedrock packs cannot
-//   draw a HUD mic button, so the in-game control is these chat commands
-//   — there is no in-game button in v2, by platform limitation, not by choice.
-//
-// FALIX FALLBACK — important, do not skip:
-// The pack-to-relay link is UNTESTED on Falix. If the Falix panel
-// blocks outbound server-net (no allowed_modules entry, no outbound
-// WebSocket, or the panel's BDS build disables server-net), the
-// WebSocket connect below will fail, positions and verify will not
-// flow, and proximity routing will not work — even though the world
-// itself runs fine. In that case the pilot's position source is
-// documented as untested/failed on that panel, and the fallback is:
-// run the same pack on a BDS you control (VPS / local BDS) where
-// config/default/permissions.json can allow "@minecraft/server-net",
-// or test the relay routing with the relay/test.js simulated pack
-// client instead of a real game pack.
+// - Mute: /voice mute and /voice unmute in game chat send a mute
+//   message on this player's pack socket; the relay applies it to the
+//   LINKED app session (the one sending audio) and tells the app via
+//   mute_ok, so the app's mic button and notification stay in sync.
+//   A HUD mic button drawn by a behaviour pack alone is not possible:
+//   resource-pack HUD buttons are client UI only and cannot reach the
+//   relay or the app; the working in-game controls are these chat
+//   commands, and the working while-playing button is the app's
+//   notification action (Mute / Unmute) in the notification shade.
 
 import { world, system } from "@minecraft/server";
 import { websocket } from "@minecraft/server-net";
@@ -94,6 +86,13 @@ async function connectPlayer(player) {
                         if (msg.type === "mute_ok") {
                             player.sendMessage(`VoiceChat: mic ${msg.muted ? "muted" : "unmuted"} (relay confirmed).`);
                         }
+                        if (msg.type === "link_ok") {
+                            player.sendMessage(
+                                msg.ok
+                                    ? `VoiceChat: voice linked for ${msg.player}. Speak — nearby players on your chosen range will hear you.`
+                                    : "VoiceChat: no app connected with your name yet. Open the app, enter the same name, press Connect, then type this command again."
+                            );
+                        }
                     } catch {
                         // Binary audio frames and non-JSON frames are ignored:
                         // the pack never plays live voice.
@@ -146,13 +145,29 @@ world.afterEvents.playerLeave.subscribe((event) => {
     disconnectPlayer(event.playerName);
 });
 
-// /voice <code> in chat: verify this app session against the game.
-// Cancelled from chat so the code is not broadcast to other players.
+// Single command: /<own name> links voice by name, no code.
+// /voice with no argument does the same. /voice <code> is the fallback.
+// Cancelled from chat so the command is not broadcast to other players.
 world.beforeEvents.chatSend.subscribe((event) => {
     const message = event.message.trim();
+    const player = event.sender;
+    const isOwnNameCommand = message.toLowerCase() === "/" + player.name.toLowerCase();
+    if (isOwnNameCommand || message === "/voice") {
+        event.cancel = true;
+        const sendLink = () => {
+            const ok = sendJson(player.name, { type: "link_by_name", player: player.name });
+            player.sendMessage(
+                ok
+                    ? "VoiceChat: linking voice by name..."
+                    : "VoiceChat: relay not connected yet, try again in a few seconds."
+            );
+        };
+        if (sockets.has(player.name)) sendLink();
+        else connectPlayer(player).then(sendLink);
+        return;
+    }
     if (!message.startsWith("/voice")) return;
     event.cancel = true;
-    const player = event.sender;
     const parts = message.split(/\s+/);
     if (parts.length === 2 && (parts[1] === "mute" || parts[1] === "unmute")) {
         const muted = parts[1] === "mute";
@@ -175,7 +190,7 @@ world.beforeEvents.chatSend.subscribe((event) => {
         return;
     }
     if (parts.length !== 2 || !/^\d{6}$/.test(parts[1])) {
-        player.sendMessage("VoiceChat usage: /voice <6-digit code> | /voice mute | /voice unmute | /voice status");
+        player.sendMessage("VoiceChat usage: /<your name> to link voice | /voice mute | /voice unmute | /voice status | /voice <6-digit code> (fallback)");
         return;
     }
     const code = parts[1];
