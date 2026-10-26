@@ -1,4 +1,4 @@
-// VoiceChat Behaviour Pack — pilot v3
+// VoiceChat Behaviour Pack — pilot v4
 // Bedrock 1.26.x, Beta APIs, BDS only. @minecraft/server-net is
 // pre-release and only works on Bedrock Dedicated Server, not on the
 // game client and not on Realms.
@@ -7,26 +7,29 @@
 // - DOES track each player's position (x, y, z, dimension) once per
 //   second and send it to the voice relay over a WebSocket opened
 //   with server-net, one socket per player.
-// - DOES handle the single command /<own name> (e.g. /ahmdawd3): it
-//   sends {type:"link_by_name", player} to relay v3, which links the
-//   app session with the same name to this pack socket — no code.
-//   /voice with no argument does the same thing. The old
-//   /voice <6-digit code> verify path is kept as a fallback.
+// - DOES auto-link voice by name (relay v4): the pack socket says
+//   hello with pack:true and the player's name; the relay links it to
+//   the app session with the same name automatically. NO in-game
+//   command is needed anymore: open the app, enter your name, press
+//   Connect, join the game, and voice is linked.
+// - WHY NO CHAT COMMAND: on 1.26.52, Mojang REMOVED the chatSend
+//   before-event (world.beforeEvents.chatSend is undefined — proven by
+//   the 2026-10-26 console error "cannot read property 'subscribe' of
+//   undefined at main.js:169"). Any script that subscribes to it
+//   crashes at load and nothing in the pack runs. So v4 subscribes to
+//   NOTHING chat-related: playerSpawn, playerLeave and runInterval
+//   only. Do NOT re-add a chatSend subscription on 1.26.52.
 // - DOES surface relay messages it receives on a player's socket
 //   (for example a "speaking" notice) as an in-game action bar line.
 // - Does NOT capture microphone audio. Does NOT play live voice.
 //   Bedrock packs play only pre-bundled sounds; live voice capture
 //   and playback live in the Android app only. Any claim otherwise
 //   would be false, and this pack makes no such claim.
-// - Mute: /voice mute and /voice unmute in game chat send a mute
-//   message on this player's pack socket; the relay applies it to the
-//   LINKED app session (the one sending audio) and tells the app via
-//   mute_ok, so the app's mic button and notification stay in sync.
-//   A HUD mic button drawn by a behaviour pack alone is not possible:
-//   resource-pack HUD buttons are client UI only and cannot reach the
-//   relay or the app; the working in-game controls are these chat
-//   commands, and the working while-playing button is the app's
-//   notification action (Mute / Unmute) in the notification shade.
+// - Mute: the working mute controls are the app's mic button and its
+//   notification actions (Mute / Unmute) in the notification shade
+//   while playing. A HUD mic button drawn by a behaviour pack alone
+//   is not possible: resource-pack HUD buttons are client UI only
+//   and cannot reach the relay or the app.
 
 import { world, system } from "@minecraft/server";
 // Namespace import on purpose: if a future server-net build renames
@@ -77,7 +80,7 @@ async function connectPlayer(player) {
         sockets.set(player.name, client);
         // Identify this socket to the relay as this in-game player.
         // Position messages on this socket are then that player's.
-        client.send(JSON.stringify({ type: "hello", name: player.name }));
+        client.send(JSON.stringify({ type: "hello", name: player.name, pack: true }));
         // Best-effort receive handling: the exact receive-event name
         // differs between server-net pre-release builds. If the build
         // exposes a message event, surface "speaking" notices in game.
@@ -155,7 +158,7 @@ world.afterEvents.playerSpawn.subscribe((event) => {
     // not load (Beta APIs / module version / pack activation), and no
     // chat command can work — that is the diagnostic that matters.
     try {
-        event.player.sendMessage(`VoiceChat: pack loaded. Type /${event.player.name} to link voice.`);
+        event.player.sendMessage(`VoiceChat: pack loaded. Voice links automatically — open the app, enter the same name, press Connect.`);
     } catch { /* ignore */ }
 });
 
@@ -163,71 +166,12 @@ world.afterEvents.playerLeave.subscribe((event) => {
     disconnectPlayer(event.playerName);
 });
 
-// Single command: /<own name> links voice by name, no code.
-// /voice with no argument does the same. /voice <code> is the fallback.
-// Cancelled from chat so the command is not broadcast to other players.
-world.beforeEvents.chatSend.subscribe((event) => {
-    const message = event.message.trim();
-    const player = event.sender;
-    // Plain-word fallback: if slash commands never reach chatSend on
-    // this build, typing just your name (no slash) still links voice.
-    const isOwnNameCommand = message.toLowerCase() === "/" + player.name.toLowerCase()
-        || message.toLowerCase() === player.name.toLowerCase();
-    if (isOwnNameCommand || message === "/voice") {
-        event.cancel = true;
-        const sendLink = () => {
-            const ok = sendJson(player.name, { type: "link_by_name", player: player.name });
-            player.sendMessage(
-                ok
-                    ? "VoiceChat: linking voice by name..."
-                    : "VoiceChat: relay not connected yet, try again in a few seconds."
-            );
-        };
-        if (sockets.has(player.name)) sendLink();
-        else connectPlayer(player).then(sendLink);
-        return;
-    }
-    if (!message.startsWith("/voice")) return;
-    event.cancel = true;
-    const parts = message.split(/\s+/);
-    if (parts.length === 2 && (parts[1] === "mute" || parts[1] === "unmute")) {
-        const muted = parts[1] === "mute";
-        const doMute = () => {
-            const ok = sendJson(player.name, { type: "mute", muted: muted });
-            player.sendMessage(
-                ok
-                    ? `VoiceChat: ${muted ? "mute" : "unmute"} command sent to the relay.`
-                    : "VoiceChat: relay not connected yet, try again in a few seconds."
-            );
-        };
-        if (sockets.has(player.name)) doMute();
-        else connectPlayer(player).then(doMute);
-        return;
-    }
-    if (parts.length === 2 && parts[1] === "status") {
-        player.sendMessage(
-            `VoiceChat: relay socket ${sockets.has(player.name) ? "connected" : "NOT connected"} for ${player.name}.`
-        );
-        return;
-    }
-    if (parts.length !== 2 || !/^\d{6}$/.test(parts[1])) {
-        player.sendMessage("VoiceChat usage: /<your name> to link voice | /voice mute | /voice unmute | /voice status | /voice <6-digit code> (fallback)");
-        return;
-    }
-    const code = parts[1];
-    const sendVerify = () => {
-        const ok = sendJson(player.name, { type: "verify", code: code, player: player.name });
-        player.sendMessage(
-            ok
-                ? "VoiceChat: verify code sent to the relay."
-                : "VoiceChat: relay not connected yet, try again in a few seconds."
-        );
-    };
-    if (sockets.has(player.name)) {
-        sendVerify();
-    } else {
-        connectPlayer(player).then(sendVerify);
-    }
-});
+// NO CHAT COMMANDS ON 1.26.52 — DO NOT RE-ADD THEM.
+// world.beforeEvents.chatSend does not exist on this build (it was
+// removed by Mojang); subscribing to it throws at load time and kills
+// the whole script (console error at old main.js:169, 2026-10-26).
+// Voice linking is automatic by matching name (pack hello pack:true
+// + app hello with the same name, linked by relay v4). Mute is via
+// the app mic button and its notification actions.
 
 console.warn("VoiceChat behaviour pack loaded. Relay: " + RELAY_URL);
