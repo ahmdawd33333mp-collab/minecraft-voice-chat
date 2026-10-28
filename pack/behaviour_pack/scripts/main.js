@@ -91,11 +91,12 @@ function stateFor(name) {
 }
 
 // ---- In-game menus (no leaving the game) ----
-// The ONLY menu is /s (groups panel). The Voice Menu item below is
-// just a shortcut for it: an echo shard the pack gives each player
-// on join; right-click it and the /s panel opens. No /v menu and no
-// /v commands remain — /s covers range, global and groups; mute
-// stays on the app mic button and its notification actions.
+// The ONLY menu is /s (groups panel). No /v menu and no /v commands
+// remain — /s covers range, global and groups; /c toggles mute,
+// /cc opens the panel. Mute also stays on the app mic button and
+// its notification actions. (The old Voice Menu item was removed on
+// the player's order; MENU_ITEM_* below only identify leftovers to
+// clean out of inventories.)
 // ActionForm = button menu, ModalForm = input fields. Both come from
 // @minecraft/server-ui, a stable module — no Beta-APIs permission
 // needed beyond what the pack already requires for server-net.
@@ -210,19 +211,26 @@ async function openRangeForm(player) {
     if (globalOn !== st.global) sendJson(player.name, { type: "global", global: globalOn });
 }
 
-function giveMenuItem(player) {
+// The Voice Menu item was REMOVED on the player's order. This only
+// cleans up copies already sitting in inventories (best effort —
+// if clearing fails, the leftover item simply does nothing, since
+// the itemUse handler below was removed too).
+function removeMenuItem(player) {
     try {
         const inv = player.getComponent("inventory")?.container;
         if (!inv) return;
         for (let i = 0; i < inv.size; i++) {
             const it = inv.getItem(i);
-            if (it && it.typeId === MENU_ITEM_ID && it.nameTag === MENU_ITEM_NAME) return;
+            if (it && it.typeId === MENU_ITEM_ID && it.nameTag === MENU_ITEM_NAME) {
+                try {
+                    inv.setItem(i, undefined);
+                } catch {
+                    // leave it; without the handler it does nothing
+                }
+            }
         }
-        const stack = new ItemStack(MENU_ITEM_ID, 1);
-        stack.nameTag = MENU_ITEM_NAME;
-        inv.addItem(stack);
     } catch {
-        // Inventory unavailable; bare /v still opens the menu.
+        // ignore
     }
 }
 
@@ -345,6 +353,13 @@ async function connectPlayer(player) {
                             player.sendMessage(`VoiceChat: ${msg.message}`);
                         }
                         if (msg.type === "mute_ok") {
+                            // Pack-originated mutes (e.g. /c) arrive here, not
+                            // as a "mute" broadcast — track them too, or the
+                            // nametag would show the link mark instead of
+                            // the plain name the player asked for when muted.
+                            if (msg.muted) mutedNames.add(player.name);
+                            else mutedNames.delete(player.name);
+                            applyNameTag(player);
                             player.sendMessage(`VoiceChat: mic ${msg.muted ? "muted" : "unmuted"} (relay confirmed).`);
                         }
                         if (msg.type === "link_ok") {
@@ -409,10 +424,41 @@ system.beforeEvents.startup.subscribe((event) => {
     const fail = (message) => ({ status: CustomCommandStatus.Failure, message });
     const noRelay = () => fail("VoiceChat: relay is not connected — try again in a few seconds.");
     const notPlayer = () => fail("VoiceChat: run this in game as a player.");
-    // /s is the ONLY command. /v, /vglobal and /vgroup were removed
+    // /s is the main command. /v, /vglobal and /vgroup were removed
     // on the player's order — everything they did lives in the /s
     // panel (range + global toggle under Normal range, groups under
     // Create/Browse), so nothing is lost by removing them.
+    // /c toggles mute, /cc opens the /s panel — short commands the
+    // player asked for, same Any permission, no cheats required.
+    const cDef = (name) => ({
+        name,
+        description: "VoiceChat: mute/unmute your mic",
+        cheatsRequired: false,
+        permissionLevel: CommandPermissionLevel.Any,
+    });
+    const cCb = (origin) => {
+        const player = playerOf(origin);
+        if (!player) return notPlayer();
+        const target = !mutedNames.has(player.name);
+        if (!sendJson(player.name, { type: "mute", muted: target })) return noRelay();
+        return undefined;
+    };
+    register("c", cDef("c"), cCb);
+    register("voice:c", cDef("voice:c"), cCb);
+    const ccDef = (name) => ({
+        name,
+        description: "VoiceChat: open the groups panel",
+        cheatsRequired: false,
+        permissionLevel: CommandPermissionLevel.Any,
+    });
+    const ccCb = (origin) => {
+        const player = playerOf(origin);
+        if (!player) return notPlayer();
+        openGroupsMenu(player);
+        return undefined;
+    };
+    register("cc", ccDef("cc"), ccCb);
+    register("voice:cc", ccDef("voice:cc"), ccCb);
     const sDef = (name) => ({
         name,
         description: "VoiceChat: open the groups panel (create or browse groups)",
@@ -464,7 +510,7 @@ system.runInterval(() => {
 
 world.afterEvents.playerSpawn.subscribe((event) => {
     connectPlayer(event.player);
-    giveMenuItem(event.player);
+    removeMenuItem(event.player);
     // Proof-of-life: if the script is running at all, the player sees
     // this the moment he joins. If he does NOT see it, the script did
     // not load (Beta APIs / module version / pack activation), and no
@@ -478,20 +524,8 @@ world.afterEvents.playerLeave.subscribe((event) => {
     disconnectPlayer(event.playerName);
 });
 
-// Right-click the Voice Menu item to open the same menu as bare /v.
-// (This is the closest Bedrock gets to a Java-mod HUD button: a
-// resource-pack HUD button cannot reach the script or the relay, so
-// the menu is opened from an item instead — still inside the game.)
-world.afterEvents.itemUse.subscribe((event) => {
-    try {
-        const stack = event.itemStack;
-        if (stack && stack.typeId === MENU_ITEM_ID && stack.nameTag === MENU_ITEM_NAME) {
-            openGroupsMenu(event.source);
-        }
-    } catch {
-        // ignore
-    }
-});
+// (The Voice Menu item handler was removed with the item itself:
+// /s and /cc are now the only ways to open the panel.)
 
 // NO CHAT COMMANDS ON 1.26.52 — DO NOT RE-ADD THEM.
 // world.beforeEvents.chatSend does not exist on this build (it was
