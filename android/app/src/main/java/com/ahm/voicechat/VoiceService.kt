@@ -636,13 +636,16 @@ class VoiceService : Service() {
         }
 
         override fun onPackGone() {
-            // Player left the server, game still open: stop audio, keep
-            // the session, so a rejoin re-links and audio resumes.
+            // v13: player left the server — the session ends HERE, in
+            // that second (no lingering paused session). It returns on
+            // re-enter: the watcher reconnects when the game is
+            // foreground, and the pack re-links by name at once.
             packGone = true
             appLinked = false
             playoutPaused = true
             playoutQueue.clear()
             stopCapture()
+            relay.disconnect()
             try { player?.pause() } catch (_: Exception) { }
             try { amrPlayer?.pause() } catch (_: Exception) { }
             updateNotification()
