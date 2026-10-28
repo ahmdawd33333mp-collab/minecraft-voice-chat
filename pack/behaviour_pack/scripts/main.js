@@ -112,6 +112,7 @@ async function openVoiceMenu(player) {
     form.button("Join group");
     form.button("Leave group");
     form.button(mutedNames.has(player.name) ? "Unmute mic" : "Mute mic");
+    form.button("Groups panel (/s)");
     let res;
     try {
         res = await form.show(player);
@@ -130,6 +131,99 @@ async function openVoiceMenu(player) {
         sendJson(player.name, { type: "mute", muted: !mutedNames.has(player.name) });
         return;
     }
+    if (res.selection === 5) return openGroupsMenu(player);
+}
+
+// ---- Groups panel (/s): the easy path instead of commands ----
+async function openGroupsMenu(player) {
+    if (!ActionFormData) {
+        player.sendMessage("VoiceChat: forms are unavailable on this server build.");
+        return;
+    }
+    const form = new ActionFormData();
+    form.title("VoiceChat: groups");
+    form.body("Create a group, or browse existing groups and join one.");
+    form.button("Create group");
+    form.button("Browse groups");
+    let res;
+    try {
+        res = await form.show(player);
+    } catch {
+        return;
+    }
+    if (res.canceled) return;
+    if (res.selection === 0) return openCreateGroupPanel(player);
+    if (res.selection === 1) {
+        sendJson(player.name, { type: "group_list" });
+        return;
+    }
+}
+
+async function openCreateGroupPanel(player) {
+    if (!ModalFormData) return;
+    const form = new ModalFormData();
+    form.title("VoiceChat: create group");
+    form.textField("Group name", "e.g. friends");
+    form.textField("Password", "password others must enter");
+    form.textField("Hearing range in blocks", "e.g. 100 (ignored if Unlimited is on)");
+    form.toggle("Unlimited — members hear each other anywhere", true);
+    let res;
+    try {
+        res = await form.show(player);
+    } catch {
+        return;
+    }
+    if (res.canceled) return;
+    const [name, pw, rangeText, unlimited] = res.formValues;
+    if (!name || !pw) {
+        player.sendMessage("VoiceChat: enter a group name and a password.");
+        return;
+    }
+    const msg = { type: "group_create", name, password: pw };
+    if (!unlimited) {
+        const n = Math.floor(Number(rangeText));
+        if (!Number.isFinite(n) || n < 1) {
+            player.sendMessage("VoiceChat: enter hearing blocks, or turn Unlimited on.");
+            return;
+        }
+        msg.range = Math.min(2000, n);
+    }
+    sendJson(player.name, msg);
+}
+
+async function openGroupListForm(player, names) {
+    if (!names.length) {
+        player.sendMessage("VoiceChat: no groups yet — create one first.");
+        return;
+    }
+    const form = new ActionFormData();
+    form.title("VoiceChat: groups");
+    form.body("Tap a group, then enter its password.");
+    for (const n of names) form.button(n);
+    let res;
+    try {
+        res = await form.show(player);
+    } catch {
+        return;
+    }
+    if (res.canceled) return;
+    const name = names[res.selection];
+    const pwForm = new ModalFormData();
+    pwForm.title(`Join "${name}"`);
+    pwForm.textField("Password", "password set by the group creator");
+    let pwRes;
+    try {
+        pwRes = await pwForm.show(player);
+    } catch {
+        return;
+    }
+    if (pwRes.canceled) return;
+    const [pw] = pwRes.formValues;
+    if (!pw) {
+        player.sendMessage("VoiceChat: enter the password.");
+        return;
+    }
+    sendJson(player.name, { type: "group_join", name, password: pw });
 }
 
 async function openRangeForm(player) {
@@ -302,15 +396,22 @@ async function connectPlayer(player) {
                                     : "VoiceChat: global voice OFF — back to proximity range."
                             );
                         }
+                        if (msg.type === "groups" && Array.isArray(msg.groups)) {
+                            openGroupListForm(player, msg.groups);
+                        }
                         if (msg.type === "group_ok") {
                             const st = stateFor(player.name);
                             if (msg.ok) {
                                 st.group = msg.group || null;
-                                player.sendMessage(
-                                    msg.group
-                                        ? `VoiceChat: you are in group "${msg.group}" — only its members hear you.`
-                                        : "VoiceChat: you left the group — back to proximity range."
-                                );
+                                if (msg.group) {
+                                    player.sendMessage(
+                                        msg.range
+                                            ? `VoiceChat: you are in group "${msg.group}" — members hear each other within ${msg.range} blocks.`
+                                            : `VoiceChat: you are in group "${msg.group}" — members hear each other anywhere.`
+                                    );
+                                } else {
+                                    player.sendMessage("VoiceChat: you left the group — back to proximity range.");
+                                }
                             } else {
                                 player.sendMessage(
                                     msg.reason === "bad_name_or_password"
@@ -460,6 +561,21 @@ system.beforeEvents.startup.subscribe((event) => {
     };
     register("vgroup", grpDef("vgroup"), grpCb);
     register("voice:vgroup", grpDef("voice:vgroup"), grpCb);
+    // /s: the easy groups panel, no command syntax to remember.
+    const sDef = (name) => ({
+        name,
+        description: "VoiceChat: open the groups panel (create or browse groups)",
+        cheatsRequired: false,
+        permissionLevel: CommandPermissionLevel.Any,
+    });
+    const sCb = (origin) => {
+        const player = playerOf(origin);
+        if (!player) return notPlayer();
+        openGroupsMenu(player);
+        return undefined;
+    };
+    register("s", sDef("s"), sCb);
+    register("voice:s", sDef("voice:s"), sCb);
 });
 
 // Reconnect players that are online but have no socket, and send
