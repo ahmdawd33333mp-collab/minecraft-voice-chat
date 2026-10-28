@@ -301,6 +301,13 @@ const server = Bun.serve({
     close(ws) {
       const s = clients.get(ws);
       if (s?.group) groups.get(s.group)?.members.delete(ws);
+      // The pack closed (player left the server, game still open):
+      // tell the linked app so it pauses audio but keeps its session,
+      // and a rejoin re-links it instantly.
+      if (s?.isPack && s?.appWs) {
+        const app = clients.get(s.appWs);
+        if (app) send(app.ws, { type: "pack_gone" });
+      }
       // Guard: only clear a link that still points at THIS socket, so
       // a stale socket closing late can never wipe a newer rejoin link.
       if (s?.appWs) { const app = clients.get(s.appWs); if (app && app.packWs === ws) app.packWs = null; }
