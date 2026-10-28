@@ -24,12 +24,15 @@
 //   silent, and a plain name while he is muted (no icon at all).
 //   This replaces the old "Speaking: X" action-bar text.
 // - DOES offer in-game voice controls WITHOUT leaving the game:
-//   custom commands /v [blocks] (bare /v opens the menu), /vglobal
-//   [on/off], /vgroup create|join|leave — plus a Voice Menu item
-//   (echo shard) that opens the same menu on right-click. A
-//   resource-pack HUD button like Java mods have cannot do this on
-//   Bedrock: client UI cannot reach the script or the relay, so the
-//   item + commands are the working equivalents.
+//   ONE command, /s, opens the groups panel (create/browse groups,
+//   normal range with a free number, global toggle). A Voice Menu
+//   item (echo shard, given on join) opens the same panel on
+//   right-click. A resource-pack HUD button like Java mods have
+//   cannot do this on Bedrock: client UI cannot reach the script
+//   or the relay, so the item + /s panel are the working
+//   equivalents. (Earlier /v, /vglobal and /vgroup commands were
+//   removed on the player's order; everything they did lives in
+//   the /s panel.)
 // - Does NOT capture microphone audio. Does NOT play live voice.
 //   Bedrock packs play only pre-bundled sounds; live voice capture
 //   and playback live in the Android app only. Any claim otherwise
@@ -40,7 +43,7 @@
 //   is not possible: resource-pack HUD buttons are client UI only
 //   and cannot reach the relay or the app.
 
-import { world, system, ItemStack, CustomCommandParamType, CustomCommandStatus, CommandPermissionLevel } from "@minecraft/server";
+import { world, system, ItemStack, CustomCommandStatus, CommandPermissionLevel } from "@minecraft/server";
 // Namespace imports on purpose: if a future build renames an export,
 // the whole script must NOT die at import time. A missing export only
 // breaks the feature that needs it, while everything else keeps
@@ -87,54 +90,19 @@ function stateFor(name) {
     return st;
 }
 
-// ---- Voice Menu (in-game, no leaving the game) ----
-// Opens from the Voice Menu item (echo shard) or from bare /v.
+// ---- In-game menus (no leaving the game) ----
+// The ONLY menu is /s (groups panel). The Voice Menu item below is
+// just a shortcut for it: an echo shard the pack gives each player
+// on join; right-click it and the /s panel opens. No /v menu and no
+// /v commands remain — /s covers range, global and groups; mute
+// stays on the app mic button and its notification actions.
 // ActionForm = button menu, ModalForm = input fields. Both come from
 // @minecraft/server-ui, a stable module — no Beta-APIs permission
 // needed beyond what the pack already requires for server-net.
 const MENU_ITEM_ID = "minecraft:echo_shard";
 const MENU_ITEM_NAME = "Voice Menu";
 
-async function openVoiceMenu(player) {
-    if (!ActionFormData) {
-        player.sendMessage("VoiceChat: forms are unavailable on this server build — use /v <blocks> instead.");
-        return;
-    }
-    const st = stateFor(player.name);
-    const form = new ActionFormData();
-    form.title("VoiceChat");
-    form.body(
-        `Range: ${st.range ?? "?"} blocks\n` +
-        `Mode: ${st.global ? "Global (heard everywhere)" : st.group ? "Group: " + st.group : "Proximity"}`
-    );
-    form.button("Range / Global");
-    form.button("Create group");
-    form.button("Join group");
-    form.button("Leave group");
-    form.button(mutedNames.has(player.name) ? "Unmute mic" : "Mute mic");
-    form.button("Groups panel (/s)");
-    let res;
-    try {
-        res = await form.show(player);
-    } catch {
-        return;
-    }
-    if (res.canceled) return;
-    if (res.selection === 0) return openRangeForm(player);
-    if (res.selection === 1) return openCreateGroupForm(player);
-    if (res.selection === 2) return openJoinGroupForm(player);
-    if (res.selection === 3) {
-        sendJson(player.name, { type: "group_leave" });
-        return;
-    }
-    if (res.selection === 4) {
-        sendJson(player.name, { type: "mute", muted: !mutedNames.has(player.name) });
-        return;
-    }
-    if (res.selection === 5) return openGroupsMenu(player);
-}
-
-// ---- Groups panel (/s): the easy path instead of commands ----
+// ---- Groups panel (/s): the only menu ----
 async function openGroupsMenu(player) {
     if (!ActionFormData) {
         player.sendMessage("VoiceChat: forms are unavailable on this server build.");
@@ -240,47 +208,6 @@ async function openRangeForm(player) {
     // range is set, so sending global last makes it win when on.
     if (Number.isFinite(n) && n >= 1) sendJson(player.name, { type: "range", range: Math.min(2000, n) });
     if (globalOn !== st.global) sendJson(player.name, { type: "global", global: globalOn });
-}
-
-async function openCreateGroupForm(player) {
-    if (!ModalFormData) return;
-    const form = new ModalFormData();
-    form.title("VoiceChat: create group");
-    form.textField("Group password", "password others must enter");
-    let res;
-    try {
-        res = await form.show(player);
-    } catch {
-        return;
-    }
-    if (res.canceled) return;
-    const [pw] = res.formValues;
-    if (!pw) {
-        player.sendMessage("VoiceChat: enter a password to create a group.");
-        return;
-    }
-    sendJson(player.name, { type: "group_create", password: pw });
-}
-
-async function openJoinGroupForm(player) {
-    if (!ModalFormData) return;
-    const form = new ModalFormData();
-    form.title("VoiceChat: join group");
-    form.textField("Group owner name", "player who created the group");
-    form.textField("Password", "password they set");
-    let res;
-    try {
-        res = await form.show(player);
-    } catch {
-        return;
-    }
-    if (res.canceled) return;
-    const [owner, pw] = res.formValues;
-    if (!owner || !pw) {
-        player.sendMessage("VoiceChat: enter the owner name and the password.");
-        return;
-    }
-    sendJson(player.name, { type: "group_join_owner", owner, password: pw });
 }
 
 function giveMenuItem(player) {
@@ -459,14 +386,12 @@ function disconnectPlayer(playerName) {
     voiceState.delete(playerName);
 }
 
-// ---- Custom chat commands (the /v family) ----
-// NOTE: these are NOT chatSend interceptions (Mojang removed that
-// event) — they are real commands registered with the script API's
-// custom command registry, so they work from the chat box like any
+// ---- Custom chat command (/s only) ----
+// NOTE: this is NOT a chatSend interception (Mojang removed that
+// event) — it is a real command registered with the script API's
+// custom command registry, so it works from the chat box like any
 // command, with cheats NOT required and permission level Any, meaning
-// every player can use them, not just operators.
-// Command names cannot contain @ or #, so the player's /v@ and /v#
-// map to /vglobal and /vgroup. Bare /v opens the Voice Menu form.
+// every player can use it, not just operators.
 system.beforeEvents.startup.subscribe((event) => {
     const registry = event.customCommandRegistry;
     if (!registry) return;
@@ -484,78 +409,10 @@ system.beforeEvents.startup.subscribe((event) => {
     const fail = (message) => ({ status: CustomCommandStatus.Failure, message });
     const noRelay = () => fail("VoiceChat: relay is not connected — try again in a few seconds.");
     const notPlayer = () => fail("VoiceChat: run this in game as a player.");
-    const vDef = (name) => ({
-        name,
-        description: "VoiceChat: set voice range in blocks, or open the voice menu with no number",
-        cheatsRequired: false,
-        permissionLevel: CommandPermissionLevel.Any,
-        optionalParameters: [{ name: "blocks", type: CustomCommandParamType.Integer }],
-    });
-    const vCb = (origin, blocks) => {
-        const player = playerOf(origin);
-        if (!player) return notPlayer();
-        if (blocks === undefined || blocks === null) {
-            openVoiceMenu(player);
-            return undefined;
-        }
-        const n = Math.floor(Number(blocks));
-        if (!Number.isFinite(n) || n < 1) return fail("VoiceChat: range must be 1 or more blocks.");
-        if (!sendJson(player.name, { type: "range", range: Math.min(2000, n) })) return noRelay();
-        return undefined;
-    };
-    register("v", vDef("v"), vCb);
-    register("voice:v", vDef("voice:v"), vCb);
-    const gDef = (name) => ({
-        name,
-        description: "VoiceChat: global voice on/off — heard anywhere in the world",
-        cheatsRequired: false,
-        permissionLevel: CommandPermissionLevel.Any,
-        optionalParameters: [{ name: "on", type: CustomCommandParamType.Boolean }],
-    });
-    const gCb = (origin, on) => {
-        const player = playerOf(origin);
-        if (!player) return notPlayer();
-        const target = on === undefined || on === null ? !stateFor(player.name).global : Boolean(on);
-        if (!sendJson(player.name, { type: "global", global: target })) return noRelay();
-        return undefined;
-    };
-    register("vglobal", gDef("vglobal"), gCb);
-    register("voice:vglobal", gDef("voice:vglobal"), gCb);
-    const grpDef = (name) => ({
-        name,
-        description: "VoiceChat groups: create <password> | join <owner> <password> | leave",
-        cheatsRequired: false,
-        permissionLevel: CommandPermissionLevel.Any,
-        mandatoryParameters: [{ name: "action", type: CustomCommandParamType.String }],
-        optionalParameters: [
-            { name: "name", type: CustomCommandParamType.String },
-            { name: "password", type: CustomCommandParamType.String },
-        ],
-    });
-    const grpCb = (origin, action, name, password) => {
-        const player = playerOf(origin);
-        if (!player) return notPlayer();
-        const act = String(action || "").toLowerCase();
-        if (act === "leave") {
-            if (!sendJson(player.name, { type: "group_leave" })) return noRelay();
-            return undefined;
-        }
-        if (act === "create") {
-            const pw = password ?? name;
-            if (!pw) return fail("VoiceChat: usage: /vgroup create <password>");
-            if (!sendJson(player.name, { type: "group_create", password: pw })) return noRelay();
-            return undefined;
-        }
-        if (act === "join") {
-            if (!name || !password) return fail("VoiceChat: usage: /vgroup join <owner> <password>");
-            if (!sendJson(player.name, { type: "group_join_owner", owner: name, password })) return noRelay();
-            return undefined;
-        }
-        return fail("VoiceChat: usage: /vgroup create <password> | join <owner> <password> | leave");
-    };
-    register("vgroup", grpDef("vgroup"), grpCb);
-    register("voice:vgroup", grpDef("voice:vgroup"), grpCb);
-    // /s: the easy groups panel, no command syntax to remember.
+    // /s is the ONLY command. /v, /vglobal and /vgroup were removed
+    // on the player's order — everything they did lives in the /s
+    // panel (range + global toggle under Normal range, groups under
+    // Create/Browse), so nothing is lost by removing them.
     const sDef = (name) => ({
         name,
         description: "VoiceChat: open the groups panel (create or browse groups)",
@@ -629,7 +486,7 @@ world.afterEvents.itemUse.subscribe((event) => {
     try {
         const stack = event.itemStack;
         if (stack && stack.typeId === MENU_ITEM_ID && stack.nameTag === MENU_ITEM_NAME) {
-            openVoiceMenu(event.source);
+            openGroupsMenu(event.source);
         }
     } catch {
         // ignore
