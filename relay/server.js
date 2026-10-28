@@ -71,6 +71,9 @@ function tryAutoLink(s) {
     if (pack.pendingGlobal !== undefined) { applyGlobal(app, pack.pendingGlobal); pack.pendingGlobal = undefined; }
     send(pack.ws, { type: "link_ok", ok: true, player: pack.name });
     send(app.ws, { type: "linked", player: pack.name });
+    // v19: pack memory resets on server restart, relay state does
+    // not — sync the real group/range/global so the panel is truthful.
+    send(pack.ws, { type: "state_sync", group: app.group || null, range: app.range, global: app.global });
     return;
   }
 }
@@ -271,6 +274,25 @@ const server = Bun.serve({
         const reply = (obj) => { send(ws, obj); if (actor.ws !== ws) send(actor.ws, obj); };
         const leaveCurrent = () => { if (actor.group) groups.get(actor.group)?.members.delete(actor.ws); actor.group = null; };
         if (msg.type === "group_leave") {
+          // v19: leaving deletes the whole group at once — no zombie
+          // groups lingering after a restart. Every other member is
+          // kicked back to proximity and told.
+          const gName = actor.group;
+          if (gName) {
+            const grp = groups.get(gName);
+            if (grp) {
+              for (const mWs of [...grp.members]) {
+                if (mWs === actor.ws) continue;
+                const m = clients.get(mWs);
+                if (!m) continue;
+                m.group = null;
+                send(mWs, { type: "group_ok", ok: true, group: null });
+                const mPack = m.packWs && clients.get(m.packWs);
+                if (mPack) send(mPack.ws, { type: "group_deleted", group: gName });
+              }
+            }
+            groups.delete(gName);
+          }
           leaveCurrent();
           reply({ type: "group_ok", ok: true, group: null });
         } else if (msg.type === "group_create") {
