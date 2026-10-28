@@ -22,7 +22,9 @@ import org.json.JSONObject
  *        group_join {name, password}, group_leave
  *   in:  hello_ok, code {code}, verified {player}, mute_ok {muted},
  *        groups {groups}, group_ok {ok, group, reason},
- *        speaking {from, speaking} + one binary audio frame after it.
+ *        speaking {from, speaking} + one binary audio frame after it,
+ *        pack_gone (the linked pack socket closed: player left the
+ *        server while the game is still open).
  * Position messages are pack-side only. This app never sends a position.
  */
 class RelayClient(private val listener: Listener) {
@@ -34,6 +36,7 @@ class RelayClient(private val listener: Listener) {
         fun onCode(code: String)
         fun onVerified(player: String)
         fun onLinked(player: String)
+        fun onPackGone()
         fun onMuteOk(muted: Boolean)
         fun onGroups(groups: List<String>)
         fun onGroupOk(ok: Boolean, group: String?, reason: String?)
@@ -71,6 +74,7 @@ class RelayClient(private val listener: Listener) {
                         "code" -> listener.onCode(json.optString("code"))
                         "verified" -> listener.onVerified(json.optString("player"))
                         "linked" -> listener.onLinked(json.optString("player"))
+                        "pack_gone" -> listener.onPackGone()
                         "mute_ok" -> listener.onMuteOk(json.optBoolean("muted"))
                         "groups" -> {
                             val arr = json.optJSONArray("groups")
