@@ -4,10 +4,16 @@
 // recipients allowed by the rules below, with a `from` name attached.
 // Rules, in order:
 //  1. Sender muted -> nobody receives.
-//  2. Sender in a group -> only group members receive, any distance, any dimension.
-//  3. Otherwise -> only players in the same dimension within the SENDER's
+//  2. Sender global -> EVERY named session receives, any distance, any dimension.
+//  3. Sender in a group -> only group members receive, any distance, any dimension.
+//  4. Otherwise -> only players in the same dimension within the SENDER's
 //     chosen range receive (range is per app session, default 15, the app
 //     lets the player pick 20/30/50/100/200/500/1000/2000).
+// In-game /v commands and the Voice Menu send range/global/group on the
+// PACK socket; the relay applies them to the LINKED APP session (the
+// audio sender) or keeps them pending until the app links. Groups made
+// in game are named after their creator, so joining needs only the
+// owner's name + password.
 // Identity v4 (automatic, no command): the game pack says hello with
 // pack:true and the in-game player name; the app says hello with the
 // player's entered name. When a pack socket and an app session share
@@ -53,6 +59,10 @@ function tryAutoLink(s) {
     app.player = pack.name;
     app.packWs = pack.ws;
     pack.appWs = app.ws;
+    // A pack menu/range command issued before the app linked is kept
+    // as pending on the pack session and applied now, once, at link.
+    if (pack.pendingRange !== undefined) { app.range = pack.pendingRange; app.global = false; pack.pendingRange = undefined; }
+    if (pack.pendingGlobal !== undefined) { applyGlobal(app, pack.pendingGlobal); pack.pendingGlobal = undefined; }
     send(pack.ws, { type: "link_ok", ok: true, player: pack.name });
     send(app.ws, { type: "linked", player: pack.name });
     return;
@@ -86,14 +96,32 @@ function effectivePos(s) {
   }
   return null;
 }
+// Modes are mutually exclusive: global beats group, group beats
+// proximity. Enabling one clears the others (see applyGlobal and the
+// group handlers), so routing never has to guess which mode applies.
+function applyGlobal(app, on) {
+  app.global = Boolean(on);
+  if (app.global && app.group) {
+    groups.get(app.group)?.members.delete(app.ws);
+    app.group = null;
+  }
+}
 function recipientsFor(sender) {
   const out = [];
+  if (sender.muted) return out;
+  if (sender.global) {
+    for (const [ws, s] of clients) {
+      if (ws === sender.ws) continue;
+      if (!s.name) continue;
+      out.push(ws);
+    }
+    return out;
+  }
   const senderPos = effectivePos(sender);
   const range = sender.range || DEFAULT_PROXIMITY;
   for (const [ws, s] of clients) {
     if (ws === sender.ws) continue;
     if (!s.name) continue;
-    if (sender.muted) continue;
     if (sender.group) {
       if (s.group === sender.group) out.push(ws);
       continue;
@@ -114,7 +142,7 @@ const server = Bun.serve({
   },
   websocket: {
     open(ws) {
-      clients.set(ws, { ws, name: null, player: null, pos: null, muted: false, group: null, appWs: null, packWs: null, isPack: false, range: DEFAULT_PROXIMITY });
+      clients.set(ws, { ws, name: null, player: null, pos: null, muted: false, group: null, global: false, appWs: null, packWs: null, isPack: false, range: DEFAULT_PROXIMITY, pendingRange: undefined, pendingGlobal: undefined });
     },
     message(ws, message) {
       const s = clients.get(ws);
@@ -139,8 +167,29 @@ const server = Bun.serve({
         evictStalePackSessions(s);
         tryAutoLink(s);
       } else if (msg.type === "range") {
-        s.range = clampRange(msg.range);
-        send(ws, { type: "range_ok", range: s.range });
+        // From a pack socket (in-game /v or menu) this sets the range
+        // of the LINKED APP session — the app is the audio sender, so
+        // the pack session's own range would never be read. Unlinked
+        // pack commands are kept as pending and applied at link time.
+        const r = clampRange(msg.range);
+        if (s.isPack) {
+          const app = s.appWs && clients.get(s.appWs);
+          if (app) { app.range = r; app.global = false; send(app.ws, { type: "range_ok", range: r }); send(ws, { type: "range_ok", range: r }); }
+          else { s.pendingRange = r; send(ws, { type: "voice_error", message: "no app linked yet — open the app, enter the same name, press Connect, then try again" }); }
+        } else {
+          s.range = r;
+          send(ws, { type: "range_ok", range: s.range });
+        }
+      } else if (msg.type === "global") {
+        const on = Boolean(msg.global);
+        if (s.isPack) {
+          const app = s.appWs && clients.get(s.appWs);
+          if (app) { applyGlobal(app, on); send(app.ws, { type: "global_ok", global: app.global }); send(ws, { type: "global_ok", global: app.global }); }
+          else { s.pendingGlobal = on; send(ws, { type: "voice_error", message: "no app linked yet — open the app, enter the same name, press Connect, then try again" }); }
+        } else {
+          applyGlobal(s, on);
+          send(ws, { type: "global_ok", global: s.global });
+        }
       } else if (msg.type === "request_code") {
         const code = String(Math.floor(100000 + Math.random() * 900000));
         codes.set(code, ws);
@@ -191,28 +240,48 @@ const server = Bun.serve({
         // can clear the moment this player mutes (not just on timeout).
         const packWs = target.packWs && clients.get(target.packWs) ? target.packWs : null;
         if (packWs && packWs !== ws) send(packWs, { type: "mute", player: target.name, muted: target.muted });
-      } else if (msg.type === "group_create") {
-        const name = String(msg.name || "").slice(0, 32);
-        if (!name || groups.has(name)) { send(ws, { type: "group_ok", ok: false, reason: "exists_or_empty" }); return; }
-        groups.set(name, { passwordHash: hashPassword(msg.password || ""), members: new Set([ws]) });
-        if (s.group) groups.get(s.group)?.members.delete(ws);
-        s.group = name;
-        send(ws, { type: "group_ok", ok: true, group: name });
+      } else if (msg.type === "group_create" || msg.type === "group_join" || msg.type === "group_join_owner" || msg.type === "group_leave") {
+        // Group ops from a pack socket act on the LINKED APP session
+        // (the audio sender). A group created in game is named after
+        // its creator, so joining needs only the owner's name + the
+        // password — exactly the /vgroup join <owner> <password> form.
+        const actor = s.isPack ? (s.appWs && clients.get(s.appWs)) : s;
+        if (!actor) { send(ws, { type: "voice_error", message: "no app linked yet — open the app, enter the same name, press Connect, then try again" }); return; }
+        const reply = (obj) => { send(ws, obj); if (actor.ws !== ws) send(actor.ws, obj); };
+        const leaveCurrent = () => { if (actor.group) groups.get(actor.group)?.members.delete(actor.ws); actor.group = null; };
+        if (msg.type === "group_leave") {
+          leaveCurrent();
+          reply({ type: "group_ok", ok: true, group: null });
+        } else if (msg.type === "group_create") {
+          const name = s.isPack ? actor.name : String(msg.name || "").slice(0, 32);
+          const existing = name ? groups.get(name) : null;
+          if (!name) { reply({ type: "group_ok", ok: false, reason: "exists_or_empty" }); return; }
+          if (existing && existing.owner && existing.owner.toLowerCase() !== actor.name.toLowerCase()) { reply({ type: "group_ok", ok: false, reason: "exists_or_empty" }); return; }
+          leaveCurrent();
+          groups.set(name, { passwordHash: hashPassword(msg.password || ""), members: new Set([actor.ws]), owner: actor.name });
+          actor.group = name; actor.global = false;
+          reply({ type: "group_ok", ok: true, group: name });
+        } else {
+          let g = null, gName = null;
+          if (msg.type === "group_join_owner") {
+            const owner = String(msg.owner || "").toLowerCase();
+            for (const [n, grp] of groups) {
+              if (grp.owner && grp.owner.toLowerCase() === owner) { g = grp; gName = n; break; }
+            }
+          } else {
+            gName = String(msg.name || "");
+            g = groups.get(gName);
+          }
+          if (!g || g.passwordHash !== hashPassword(msg.password || "")) {
+            reply({ type: "group_ok", ok: false, reason: "bad_name_or_password" }); return;
+          }
+          leaveCurrent();
+          g.members.add(actor.ws);
+          actor.group = gName; actor.global = false;
+          reply({ type: "group_ok", ok: true, group: gName });
+        }
       } else if (msg.type === "group_list") {
         send(ws, { type: "groups", groups: [...groups.keys()] });
-      } else if (msg.type === "group_join") {
-        const g = groups.get(String(msg.name || ""));
-        if (!g || g.passwordHash !== hashPassword(msg.password || "")) {
-          send(ws, { type: "group_ok", ok: false, reason: "bad_name_or_password" }); return;
-        }
-        if (s.group) groups.get(s.group)?.members.delete(ws);
-        g.members.add(ws);
-        s.group = String(msg.name);
-        send(ws, { type: "group_ok", ok: true, group: s.group });
-      } else if (msg.type === "group_leave") {
-        if (s.group) groups.get(s.group)?.members.delete(ws);
-        s.group = null;
-        send(ws, { type: "group_ok", ok: true, group: null });
       }
     },
     close(ws) {
