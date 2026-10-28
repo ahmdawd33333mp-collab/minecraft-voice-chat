@@ -127,10 +127,12 @@ async function openGroupsMenu(player) {
     form.button("Browse groups");
     form.button("Normal range (blocks)");
     form.button(st.global ? "Global voice: turn OFF" : "Global voice: turn ON");
-    // v18: leave button, only while in a group — group routing beats
-    // proximity, so a player stuck in a group the other never joined
-    // hears nothing even standing together.
-    if (st.group) form.button(`Leave group "${st.group}"`);
+    // v19: leave button ALWAYS visible — pack memory resets on a
+    // server restart while relay membership survives, so gating on
+    // st.group hid the button exactly when it was needed most.
+    // Group routing beats proximity, so a player stuck in a group
+    // the other never joined hears nothing even standing together.
+    form.button(st.group ? `Leave group "${st.group}"` : "Leave group");
     let res;
     try {
         res = await form.show(player);
@@ -364,6 +366,21 @@ async function connectPlayer(player) {
                         }
                         if (msg.type === "groups" && Array.isArray(msg.groups)) {
                             openGroupListForm(player, msg.groups);
+                        }
+                        if (msg.type === "state_sync") {
+                            // Relay truth after a (re)link: pack memory
+                            // resets on server restart, relay state does
+                            // not — so the panel shows the real group,
+                            // range and global instead of fresh defaults.
+                            const st = stateFor(player.name);
+                            if (msg.group !== undefined) st.group = msg.group || null;
+                            if (msg.range !== undefined) st.range = msg.range;
+                            if (msg.global !== undefined) st.global = Boolean(msg.global);
+                        }
+                        if (msg.type === "group_deleted") {
+                            const st = stateFor(player.name);
+                            st.group = null;
+                            player.sendMessage(`VoiceChat: group "${msg.group}" was deleted — back to proximity range.`);
                         }
                         if (msg.type === "group_ok") {
                             const st = stateFor(player.name);
