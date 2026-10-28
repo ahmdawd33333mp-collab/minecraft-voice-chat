@@ -58,6 +58,19 @@ function tryAutoLink(s) {
     return;
   }
 }
+// Rejoin fix: when a pack socket (re)appears for a name, any older pack
+// session with the same name is stale — its frozen position would win
+// the routing lookup (effectivePos returns the first match) and deafen
+// the rejoined player until the old socket finally closes. Drop it.
+function evictStalePackSessions(s) {
+  if (!s.isPack || !s.name) return;
+  for (const [otherWs, other] of clients) {
+    if (otherWs === s.ws || !other.isPack) continue;
+    if (other.name.toLowerCase() !== s.name.toLowerCase()) continue;
+    try { otherWs.close(); } catch {}
+    clients.delete(otherWs);
+  }
+}
 function distance(a, b) {
   const dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
@@ -123,6 +136,7 @@ const server = Bun.serve({
         if (msg.pack === true) s.isPack = true;
         if (msg.range !== undefined) s.range = clampRange(msg.range);
         send(ws, { type: "hello_ok", name: s.name, proximity: s.range });
+        evictStalePackSessions(s);
         tryAutoLink(s);
       } else if (msg.type === "range") {
         s.range = clampRange(msg.range);
@@ -163,6 +177,7 @@ const server = Bun.serve({
       } else if (msg.type === "position") {
         s.isPack = true;
         s.pos = { x: Number(msg.x), y: Number(msg.y), z: Number(msg.z), dimension: String(msg.dimension || "overworld") };
+        evictStalePackSessions(s);
         tryAutoLink(s);
       } else if (msg.type === "mute") {
         // A mute from a linked pack socket (/voice mute in game) mutes the
@@ -172,6 +187,10 @@ const server = Bun.serve({
         target.muted = Boolean(msg.muted);
         send(ws, { type: "mute_ok", muted: target.muted });
         if (target.ws !== ws) send(target.ws, { type: "mute_ok", muted: target.muted });
+        // Tell the linked pack socket too, so the in-game nametag icon
+        // can clear the moment this player mutes (not just on timeout).
+        const packWs = target.packWs && clients.get(target.packWs) ? target.packWs : null;
+        if (packWs && packWs !== ws) send(packWs, { type: "mute", player: target.name, muted: target.muted });
       } else if (msg.type === "group_create") {
         const name = String(msg.name || "").slice(0, 32);
         if (!name || groups.has(name)) { send(ws, { type: "group_ok", ok: false, reason: "exists_or_empty" }); return; }
@@ -199,8 +218,10 @@ const server = Bun.serve({
     close(ws) {
       const s = clients.get(ws);
       if (s?.group) groups.get(s.group)?.members.delete(ws);
-      if (s?.appWs) { const app = clients.get(s.appWs); if (app) app.packWs = null; }
-      if (s?.packWs) { const pack = clients.get(s.packWs); if (pack) pack.appWs = null; }
+      // Guard: only clear a link that still points at THIS socket, so
+      // a stale socket closing late can never wipe a newer rejoin link.
+      if (s?.appWs) { const app = clients.get(s.appWs); if (app && app.packWs === ws) app.packWs = null; }
+      if (s?.packWs) { const pack = clients.get(s.packWs); if (pack && pack.appWs === ws) pack.appWs = null; }
       for (const [code, w] of codes) if (w === ws) codes.delete(code);
       clients.delete(ws);
     },
