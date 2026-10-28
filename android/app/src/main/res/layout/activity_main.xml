@@ -1,8 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- App v3: one big centred name field, connect, copyable chat command, range. -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- App v6: black background, microphone image, white text. No floating
+     overlay button anymore: voice is controlled from inside the game
+     (/c, /cc, /s). Scrollable so the whole screen fits small phones. -->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="#000000"
+    android:fillViewport="true">
+
+<LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
     android:orientation="vertical"
     android:gravity="center_horizontal"
     android:padding="24dp">
@@ -10,18 +18,28 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="48dp"
-        android:text="VoiceChat"
+        android:layout_marginTop="16dp"
+        android:text="ميكروفون ماين كرافت"
+        android:textColor="#FFFFFF"
         android:textSize="28sp"
         android:textStyle="bold" />
+
+    <ImageView
+        android:layout_width="160dp"
+        android:layout_height="160dp"
+        android:layout_marginTop="24dp"
+        android:src="@drawable/mic_bg"
+        android:contentDescription="Microphone" />
 
     <EditText
         android:id="@+id/nameField"
         android:layout_width="match_parent"
         android:layout_height="72dp"
-        android:layout_marginTop="40dp"
+        android:layout_marginTop="24dp"
         android:gravity="center"
         android:hint="اكتب اسمك"
+        android:textColor="#FFFFFF"
+        android:textColorHint="#AAAAAA"
         android:textSize="24sp"
         android:inputType="textPersonName" />
 
@@ -39,9 +57,10 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
         android:text="غير متصل"
+        android:textColor="#FFFFFF"
         android:textSize="16sp" />
 
-    <!-- Shown after connecting: what to type in game chat, copyable. -->
+    <!-- Shown after connecting: the link is automatic by same name. -->
     <LinearLayout
         android:id="@+id/commandSection"
         android:layout_width="match_parent"
@@ -55,6 +74,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="ادخل اللعبة — الربط تلقائي بنفس الاسم"
+            android:textColor="#FFFFFF"
             android:textSize="18sp"
             android:textStyle="bold" />
 
@@ -64,6 +84,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:text="/ahmdawd3"
+            android:textColor="#FFFFFF"
             android:textSize="22sp"
             android:textStyle="bold" />
 
@@ -80,6 +101,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="24dp"
         android:text="كم بلوك بدك يسمعوك الآخرين؟"
+        android:textColor="#FFFFFF"
         android:textSize="16sp" />
 
     <Spinner
@@ -93,14 +115,16 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
-        android:text="يتكلم الآن: -" />
+        android:text="يتكلم الآن: -"
+        android:textColor="#FFFFFF" />
 
     <Switch
         android:id="@+id/autoSenseSwitch"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
-        android:text="تشغيل تلقائي مع ماينكرافت" />
+        android:text="تشغيل تلقائي مع ماينكرافت"
+        android:textColor="#FFFFFF" />
 
     <Button
         android:id="@+id/permissionsButton"
@@ -114,12 +138,6 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="إعدادات البطارية (إذا توقفت الخدمة)" />
-
-    <Button
-        android:id="@+id/overlayButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="زر الكتم العائم فوق اللعبة" />
 
     <!-- Mic button, bottom-centre. Tap = mute/unmute, long-press = groups. -->
     <FrameLayout
@@ -139,3 +157,4 @@
     </FrameLayout>
 
 </LinearLayout>
+</ScrollView>
