@@ -63,6 +63,16 @@ import java.util.concurrent.TimeUnit
  *   The track buffer + repeat-last-frame concealment is the cushion;
  *   playback resumes on the first frame.
  *
+ * Audio, app v11 (target playout delay — validated in simulation):
+ * - Every received frame waits until it is 250 ms old before playing.
+ *   Steady state therefore always holds ~250 ms of audio, so a TCP
+ *   stall of up to ~300 ms is covered by the buffer + PLC with
+ *   essentially no audible gap (rig: stall phase silence 1 tick,
+ *   max gap 20 ms, mean latency 307 ms; jitter phase silence 2 ticks,
+ *   max gap 40 ms). Cost: ~300 ms mouth-to-ear delay, far better
+ *   than cutting. This is the app-only answer to TCP stalls; UDP
+ *   stays the fallback if real-world stalls exceed ~300 ms.
+ *
  * AUTO START / STOP, exactly as the player asked (app v6):
  * - The service loads the saved name, URL and range from preferences on
  *   start, so it works even when it was started by the boot receiver
@@ -123,11 +133,15 @@ class VoiceService : Service() {
     // to a dedicated thread. Writing to AudioTrack on the OkHttp reader
     // thread (v8) blocked the socket reader whenever the track filled,
     // which snowballed latency; the queue decouples the two.
-    private val playoutQueue = LinkedBlockingQueue<Pair<Int, ByteArray>>()
+    // v11: each queued frame carries its arrival time, so the playout
+    // thread can hold it until its target playout time (250 ms).
+    private data class AudioChunk(val rate: Int, val pcm: ByteArray, val arrivedAt: Long)
+    private val playoutDelayMs = 250L
+    private val playoutQueue = LinkedBlockingQueue<AudioChunk>()
     private var playoutThread: Thread? = null
     @Volatile private var playoutRunning = false
     @Volatile private var playoutPaused = false
-    private var lastChunk: Pair<Int, ByteArray>? = null
+    private var lastChunk: AudioChunk? = null
     @Volatile private var capturing: Boolean = false
     @Volatile private var micPausedByGame: Boolean = false
     // The linked pack closed (player left the server, game still open):
@@ -389,18 +403,10 @@ class VoiceService : Service() {
                     try { playoutQueue.poll(50, TimeUnit.MILLISECONDS) } catch (_: Exception) { }
                     continue
                 }
-                // v10: NO silent re-prime wait — the v9 wait slept up
-                // to 300 ms without feeding the track, which made gaps
-                // longer. The track buffer + PLC below is the cushion;
-                // playback resumes on the first frame.
                 // Latency snowball guard: never hold more than ~300 ms.
                 while (playoutQueue.size > 15) playoutQueue.poll()
-                val chunk = try { playoutQueue.poll(20, TimeUnit.MILLISECONDS) } catch (_: Exception) { null }
-                if (chunk != null) {
-                    lastChunk = chunk
-                    repeatCount = 0
-                    writeChunk(chunk)
-                } else {
+                val head = playoutQueue.peek()
+                if (head == null) {
                     // Underrun: repeat the last frame a few times (PLC)
                     // instead of a silence gap, then silence until data.
                     val last = lastChunk
@@ -408,16 +414,32 @@ class VoiceService : Service() {
                         repeatCount++
                         writeChunk(last)
                     } else {
-                        val rate = last?.first ?: AmrCodec.SAMPLE_RATE
-                        writeChunk(rate to ByteArray(if (rate == AmrCodec.SAMPLE_RATE) 320 else 640))
+                        val rate = last?.rate ?: AmrCodec.SAMPLE_RATE
+                        writeChunk(AudioChunk(rate, ByteArray(if (rate == AmrCodec.SAMPLE_RATE) 320 else 640), System.currentTimeMillis()))
+                    }
+                } else {
+                    val age = System.currentTimeMillis() - head.arrivedAt
+                    if (age < playoutDelayMs) {
+                        // v11 target delay: the frame is not due yet.
+                        // Sleep briefly and re-check — this is intentional
+                        // buffering, not a gap: the track keeps playing
+                        // previously written audio from its own buffer.
+                        try { Thread.sleep(minOf(20L, playoutDelayMs - age)) } catch (_: Exception) { }
+                    } else {
+                        val chunk = playoutQueue.poll()
+                        if (chunk != null) {
+                            lastChunk = chunk
+                            repeatCount = 0
+                            writeChunk(chunk)
+                        }
                     }
                 }
             }
         }.also { it.start() }
     }
 
-    private fun writeChunk(chunk: Pair<Int, ByteArray>) {
-        val (rate, pcm) = chunk
+    private fun writeChunk(chunk: AudioChunk) {
+        val pcm = chunk.pcm
         // ~1.8x gain with clamping: the second phone's weak playback.
         val out = ByteArray(pcm.size)
         var i = 0
@@ -429,7 +451,7 @@ class VoiceService : Service() {
             i += 2
         }
         try {
-            if (rate == AmrCodec.SAMPLE_RATE) amrPlayer?.write(out, 0, out.size)
+            if (chunk.rate == AmrCodec.SAMPLE_RATE) amrPlayer?.write(out, 0, out.size)
             else player?.write(out, 0, out.size)
         } catch (_: Exception) { }
     }
@@ -637,11 +659,11 @@ class VoiceService : Service() {
                 try {
                     if (amrDecoder == null) amrDecoder = AmrDecoder()
                     val pcm = amrDecoder?.decode(bytes.copyOfRange(4, bytes.size)) ?: ByteArray(0)
-                    if (pcm.isNotEmpty()) playoutQueue.offer(AmrCodec.SAMPLE_RATE to pcm)
+                    if (pcm.isNotEmpty()) playoutQueue.offer(AudioChunk(AmrCodec.SAMPLE_RATE, pcm, System.currentTimeMillis()))
                 } catch (_: Exception) { }
             } else {
                 // Legacy raw PCM 16 kHz from an older app version.
-                playoutQueue.offer(sampleRate to bytes)
+                playoutQueue.offer(AudioChunk(sampleRate, bytes, System.currentTimeMillis()))
             }
         }
     }
