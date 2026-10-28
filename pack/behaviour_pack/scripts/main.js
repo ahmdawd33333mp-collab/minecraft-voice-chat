@@ -431,6 +431,12 @@ system.beforeEvents.startup.subscribe((event) => {
     // /c mutes, /cc unmutes ("opens the mic"), /s opens the panel —
     // explicit commands, no toggle guessing, same Any permission,
     // no cheats required.
+    // NOTE: the chat autocomplete shows the short name (c, cc, s) but
+    // tapping the suggestion sends the name REVERSED (c:voice, not
+    // voice:c — seen live as "Unknown command: s:voice"). So every
+    // command is registered in BOTH directions: voice:c and c:voice,
+    // voice:cc and cc:voice, voice:s and s:voice. Tapping the
+    // suggestion and typing the full name then both work.
     const cDef = (name) => ({
         name,
         description: "VoiceChat: mute your mic",
@@ -445,6 +451,7 @@ system.beforeEvents.startup.subscribe((event) => {
     };
     register("c", cDef("c"), cCb);
     register("voice:c", cDef("voice:c"), cCb);
+    register("c:voice", cDef("c:voice"), cCb);
     const ccDef = (name) => ({
         name,
         description: "VoiceChat: unmute your mic",
@@ -459,6 +466,7 @@ system.beforeEvents.startup.subscribe((event) => {
     };
     register("cc", ccDef("cc"), ccCb);
     register("voice:cc", ccDef("voice:cc"), ccCb);
+    register("cc:voice", ccDef("cc:voice"), ccCb);
     const sDef = (name) => ({
         name,
         description: "VoiceChat: open the groups panel (create or browse groups)",
@@ -473,6 +481,7 @@ system.beforeEvents.startup.subscribe((event) => {
     };
     register("s", sDef("s"), sCb);
     register("voice:s", sDef("voice:s"), sCb);
+    register("s:voice", sDef("s:voice"), sCb);
 });
 
 // Reconnect players that are online but have no socket, and send
