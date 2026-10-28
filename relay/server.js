@@ -3,6 +3,12 @@
 // Audio is opaque: the relay never decodes it. It forwards a frame only to
 // recipients allowed by the rules below, with a `from` name attached.
 // Rules, in order:
+//  0. MIC GATE (player's rule): an app session whose player is not
+//     actually in the server — no linked pack socket — sends nothing
+//     at all, even in group/global mode (those modes need no position,
+//     so without this gate an app-only session could be heard inside
+//     the game). Connecting from the app alone never enables the mic;
+//     it works only once the player enters the server and the pack links.
 //  1. Sender muted -> nobody receives.
 //  2. Sender global -> EVERY named session receives, any distance, any dimension.
 //  3. Sender in a group -> only group members receive, any distance, any dimension.
@@ -161,6 +167,10 @@ const server = Bun.serve({
       // Binary frame = audio. Forward by the routing rules, with sender name.
       if (message instanceof ArrayBuffer || message instanceof Uint8Array) {
         if (!s.name || s.muted) return;
+        // Mic gate: app audio counts only while the player is in the
+        // server (linked pack socket present). Pack sockets never send
+        // audio, so the gate applies to app sessions only.
+        if (!s.isPack && !(s.packWs && clients.get(s.packWs))) return;
         const targets = recipientsFor(s);
         for (const t of targets) {
           try { t.send(JSON.stringify({ type: "speaking", from: s.name, speaking: true })); } catch {}
