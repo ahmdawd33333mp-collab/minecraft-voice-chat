@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
@@ -18,8 +19,11 @@ import android.os.Binder
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.Process
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 
 /**
  * Foreground service: owns the relay connection, mic capture and playback.
@@ -33,6 +37,21 @@ import androidx.core.content.ContextCompat
  * capture falls back to legacy raw PCM 16 kHz. No echo canceller
  * beyond what the platform provides (headphones remain the workaround
  * for speaker echo).
+ *
+ * Audio, app v9 (lag/cutting round 2 — v8 only fixed bandwidth):
+ * - Capture thread runs at THREAD_PRIORITY_URGENT_AUDIO and reads in
+ *   steady 20 ms chunks, so the network sees one frame per 20 ms
+ *   instead of bursts; the game can no longer starve the mic.
+ * - Playout moved off the network thread: decoded PCM goes through a
+ *   jitter-buffer queue to a dedicated URGENT_AUDIO playout thread.
+ *   The queue caps at ~300 ms (oldest dropped, so latency cannot
+ *   snowball); on underrun the last frame repeats up to 5x (simple
+ *   packet-loss concealment) instead of silence, then silence until
+ *   data resumes. After starvation the thread re-primes ~60 ms.
+ * - Playback gain ~1.8x with clamping (the second phone's weak sound)
+ *   and forced loudspeaker routing (MODE_IN_COMMUNICATION +
+ *   speakerphone on: USAGE_VOICE_COMMUNICATION alone routes to the
+ *   earpiece on some phones).
  *
  * AUTO START / STOP, exactly as the player asked (app v6):
  * - The service loads the saved name, URL and range from preferences on
@@ -90,6 +109,15 @@ class VoiceService : Service() {
     private var amrEncoder: AmrEncoder? = null
     private var amrDecoder: AmrDecoder? = null
     private var captureThread: Thread? = null
+    // v9 playout: (sampleRate, PCM) pairs through a jitter-buffer queue
+    // to a dedicated thread. Writing to AudioTrack on the OkHttp reader
+    // thread (v8) blocked the socket reader whenever the track filled,
+    // which snowballed latency; the queue decouples the two.
+    private val playoutQueue = LinkedBlockingQueue<Pair<Int, ByteArray>>()
+    private var playoutThread: Thread? = null
+    @Volatile private var playoutRunning = false
+    @Volatile private var playoutPaused = false
+    private var lastChunk: Pair<Int, ByteArray>? = null
     @Volatile private var capturing: Boolean = false
     @Volatile private var micPausedByGame: Boolean = false
     // The linked pack closed (player left the server, game still open):
@@ -132,6 +160,7 @@ class VoiceService : Service() {
             this, Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
         relay = RelayClient(ForwardingListener())
+        ensurePlayoutThread()
         createChannel()
         startForeground(NOTIFICATION_ID, buildNotification("VoiceChat idle"))
         startWatcher()
@@ -282,7 +311,13 @@ class VoiceService : Service() {
         capturing = true
         rec.startRecording()
         captureThread = Thread {
-            val buf = ByteArray(minBuf)
+            // v9: urgent audio priority — the game must not starve mic
+            // capture — and steady 20 ms reads (320 bytes at 8 kHz AMR,
+            // 640 at 16 kHz PCM) so the network sees one frame per 20 ms
+            // instead of a burst every 64-256 ms.
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+            val frameBytes = if (amrEncoder != null) 320 else 640
+            val buf = ByteArray(frameBytes)
             while (capturing) {
                 val read = try { rec.read(buf, 0, buf.size) } catch (_: Exception) { -1 }
                 if (read > 0 && relay.isConnected) {
@@ -312,6 +347,85 @@ class VoiceService : Service() {
         recorder = null
         amrEncoder?.release()
         amrEncoder = null
+    }
+
+    // ---- v9 playout: jitter buffer + concealment + gain + speaker ----
+
+    private fun ensurePlayoutThread() {
+        if (playoutRunning) return
+        playoutRunning = true
+        // Force loudspeaker routing: USAGE_VOICE_COMMUNICATION alone
+        // routes to the earpiece on some phones — the second phone's
+        // "weak sound". A connected headset still wins over this flag.
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.mode = AudioManager.MODE_IN_COMMUNICATION
+            am.isSpeakerphoneOn = true
+        } catch (_: Exception) { }
+        // Tracks exist before any audio arrives, so the playout thread
+        // never has to create them (no race with relay callbacks).
+        ensurePlayer()
+        ensureAmrPlayer()
+        playoutThread = Thread {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+            var starved = true
+            var repeatCount = 0
+            while (playoutRunning) {
+                if (playoutPaused) {
+                    // Left the server: drop incoming audio, keep polling.
+                    try { playoutQueue.poll(50, TimeUnit.MILLISECONDS) } catch (_: Exception) { }
+                    continue
+                }
+                if (starved) {
+                    // Re-prime with ~60 ms of audio before resuming, so
+                    // the next jitter spike does not underrun at once.
+                    var waited = 0
+                    while (playoutQueue.size < 3 && waited < 15 && playoutRunning && !playoutPaused) {
+                        try { Thread.sleep(20) } catch (_: Exception) { }
+                        waited++
+                    }
+                    starved = false
+                }
+                // Latency snowball guard: never hold more than ~300 ms.
+                while (playoutQueue.size > 15) playoutQueue.poll()
+                val chunk = try { playoutQueue.poll(20, TimeUnit.MILLISECONDS) } catch (_: Exception) { null }
+                if (chunk != null) {
+                    lastChunk = chunk
+                    repeatCount = 0
+                    writeChunk(chunk)
+                } else {
+                    // Underrun: repeat the last frame a few times (PLC)
+                    // instead of a silence gap, then silence until data.
+                    val last = lastChunk
+                    if (last != null && repeatCount < 5) {
+                        repeatCount++
+                        writeChunk(last)
+                    } else {
+                        starved = true
+                        val rate = last?.first ?: AmrCodec.SAMPLE_RATE
+                        writeChunk(rate to ByteArray(if (rate == AmrCodec.SAMPLE_RATE) 320 else 640))
+                    }
+                }
+            }
+        }.also { it.start() }
+    }
+
+    private fun writeChunk(chunk: Pair<Int, ByteArray>) {
+        val (rate, pcm) = chunk
+        // ~1.8x gain with clamping: the second phone's weak playback.
+        val out = ByteArray(pcm.size)
+        var i = 0
+        while (i + 1 < pcm.size) {
+            var s = (pcm[i].toInt() and 0xFF) or (pcm[i + 1].toInt() shl 8)
+            s = (s * 1.8f).toInt().coerceIn(-32768, 32767)
+            out[i] = (s and 0xFF).toByte()
+            out[i + 1] = (s shr 8).toByte()
+            i += 2
+        }
+        try {
+            if (rate == AmrCodec.SAMPLE_RATE) amrPlayer?.write(out, 0, out.size)
+            else player?.write(out, 0, out.size)
+        } catch (_: Exception) { }
     }
 
     private fun ensurePlayer() {
@@ -366,6 +480,15 @@ class VoiceService : Service() {
 
     private fun stopAll() {
         handler.removeCallbacks(watcherRunnable)
+        playoutRunning = false
+        try { playoutThread?.join(500) } catch (_: Exception) { }
+        playoutThread = null
+        playoutQueue.clear()
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.isSpeakerphoneOn = false
+            am.mode = AudioManager.MODE_NORMAL
+        } catch (_: Exception) { }
         stopCapture()
         try { player?.stop() } catch (_: Exception) { }
         try { player?.release() } catch (_: Exception) { }
@@ -450,6 +573,8 @@ class VoiceService : Service() {
         override fun onLinked(player: String) {
             // Rejoin: the pack is back, resume audio at once.
             packGone = false
+            playoutPaused = false
+            playoutQueue.clear()
             ensurePlayer()
             try { this@VoiceService.player?.play() } catch (_: Exception) { }
             try { this@VoiceService.amrPlayer?.play() } catch (_: Exception) { }
@@ -462,6 +587,8 @@ class VoiceService : Service() {
             // Player left the server, game still open: stop audio, keep
             // the session, so a rejoin re-links and audio resumes.
             packGone = true
+            playoutPaused = true
+            playoutQueue.clear()
             stopCapture()
             try { player?.pause() } catch (_: Exception) { }
             try { amrPlayer?.pause() } catch (_: Exception) { }
@@ -491,22 +618,18 @@ class VoiceService : Service() {
         }
 
         override fun onAudio(bytes: ByteArray) {
+            // v9: never write to AudioTrack here — the OkHttp reader
+            // thread must keep draining the socket. Decode (AMR) and
+            // enqueue PCM; the playout thread owns the track.
             if (AmrCodec.isAmrFrame(bytes)) {
-                // v8 AMR frame: decode to 8 kHz PCM. Decoder is created
-                // lazily; if this device lacks it, the frame is dropped
-                // (both test phones run v8, so this should not happen).
                 try {
                     if (amrDecoder == null) amrDecoder = AmrDecoder()
                     val pcm = amrDecoder?.decode(bytes.copyOfRange(4, bytes.size)) ?: ByteArray(0)
-                    if (pcm.isNotEmpty()) {
-                        ensureAmrPlayer()
-                        try { amrPlayer?.write(pcm, 0, pcm.size) } catch (_: Exception) { }
-                    }
+                    if (pcm.isNotEmpty()) playoutQueue.offer(AmrCodec.SAMPLE_RATE to pcm)
                 } catch (_: Exception) { }
             } else {
                 // Legacy raw PCM 16 kHz from an older app version.
-                ensurePlayer()
-                try { player?.write(bytes, 0, bytes.size) } catch (_: Exception) { }
+                playoutQueue.offer(sampleRate to bytes)
             }
         }
     }
