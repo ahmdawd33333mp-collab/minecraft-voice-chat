@@ -24,9 +24,15 @@ import androidx.core.content.ContextCompat
 /**
  * Foreground service: owns the relay connection, mic capture and playback.
  *
- * Audio, pilot v1: raw PCM 16 kHz mono, 16-bit. No Opus, no echo canceller
- * beyond what the platform provides. Frames are sent as binary WebSocket
- * messages; the relay forwards them opaquely.
+ * Audio, app v8: AMR-NB 12.2 kbps (8 kHz mono) through Android's built-in
+ * MediaCodec — ~20x less audio bandwidth than the pilot's raw PCM 16 kHz
+ * mono (256 kbps), which the player's own test proved was lagging the
+ * game (app OFF next to the friend = lag gone). One AMR frame (20 ms)
+ * per binary WebSocket message, magic-prefixed; the relay forwards them
+ * opaquely and needs no change. If the device lacks the AMR codec,
+ * capture falls back to legacy raw PCM 16 kHz. No echo canceller
+ * beyond what the platform provides (headphones remain the workaround
+ * for speaker echo).
  *
  * AUTO START / STOP, exactly as the player asked (app v6):
  * - The service loads the saved name, URL and range from preferences on
@@ -80,6 +86,9 @@ class VoiceService : Service() {
     private lateinit var relay: RelayClient
     private var recorder: AudioRecord? = null
     private var player: AudioTrack? = null
+    private var amrPlayer: AudioTrack? = null
+    private var amrEncoder: AmrEncoder? = null
+    private var amrDecoder: AmrDecoder? = null
     private var captureThread: Thread? = null
     @Volatile private var capturing: Boolean = false
     @Volatile private var micPausedByGame: Boolean = false
@@ -244,21 +253,51 @@ class VoiceService : Service() {
     @SuppressLint("MissingPermission")
     private fun startCapture() {
         if (capturing || muted || !micPermissionGranted) return
-        val minBuf = AudioRecord.getMinBufferSize(sampleRate, channelIn, encoding)
-        if (minBuf <= 0) return
+        // v8: try AMR first (8 kHz capture + encode). If the codec is
+        // missing on this device, fall back to legacy raw PCM 16 kHz.
+        var encoder: AmrEncoder? = null
+        var rate = sampleRate
+        try {
+            encoder = AmrEncoder()
+            rate = AmrCodec.SAMPLE_RATE
+        } catch (_: Exception) {
+            encoder = null
+            rate = sampleRate
+        }
+        val minBuf = AudioRecord.getMinBufferSize(rate, channelIn, encoding)
+        if (minBuf <= 0) {
+            encoder?.release()
+            return
+        }
         val rec = AudioRecord(
             MediaRecorder.AudioSource.MIC,
-            sampleRate, channelIn, encoding, minBuf * 2
+            rate, channelIn, encoding, minBuf * 2
         )
-        if (rec.state != AudioRecord.STATE_INITIALIZED) return
+        if (rec.state != AudioRecord.STATE_INITIALIZED) {
+            encoder?.release()
+            return
+        }
         recorder = rec
+        amrEncoder = encoder
         capturing = true
         rec.startRecording()
         captureThread = Thread {
             val buf = ByteArray(minBuf)
             while (capturing) {
                 val read = try { rec.read(buf, 0, buf.size) } catch (_: Exception) { -1 }
-                if (read > 0 && relay.isConnected) relay.sendAudio(buf, read)
+                if (read > 0 && relay.isConnected) {
+                    val enc = amrEncoder
+                    if (enc != null) {
+                        try {
+                            for (frame in enc.encode(buf, read)) {
+                                val msg = AmrCodec.prefixFrame(frame)
+                                relay.sendAudio(msg, msg.size)
+                            }
+                        } catch (_: Exception) { }
+                    } else {
+                        relay.sendAudio(buf, read)
+                    }
+                }
             }
         }.also { it.start() }
         ensurePlayer()
@@ -271,6 +310,8 @@ class VoiceService : Service() {
         try { recorder?.stop() } catch (_: Exception) { }
         try { recorder?.release() } catch (_: Exception) { }
         recorder = null
+        amrEncoder?.release()
+        amrEncoder = null
     }
 
     private fun ensurePlayer() {
@@ -291,10 +332,36 @@ class VoiceService : Service() {
                     .setEncoding(encoding)
                     .build()
             )
-            .setBufferSizeInBytes(minBuf * 2)
+            // x4 buffer (was x2): headroom against network jitter, so
+            // playback gaps — one half of the "cutting" complaint — get rarer.
+            .setBufferSizeInBytes(minBuf * 4)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
         try { player?.play() } catch (_: Exception) { }
+    }
+
+    private fun ensureAmrPlayer() {
+        if (amrPlayer != null) return
+        val minBuf = AudioTrack.getMinBufferSize(AmrCodec.SAMPLE_RATE, channelOut, encoding)
+        if (minBuf <= 0) return
+        amrPlayer = AudioTrack.Builder()
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setSampleRate(AmrCodec.SAMPLE_RATE)
+                    .setChannelMask(channelOut)
+                    .setEncoding(encoding)
+                    .build()
+            )
+            .setBufferSizeInBytes(minBuf * 4)
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
+        try { amrPlayer?.play() } catch (_: Exception) { }
     }
 
     private fun stopAll() {
@@ -303,6 +370,11 @@ class VoiceService : Service() {
         try { player?.stop() } catch (_: Exception) { }
         try { player?.release() } catch (_: Exception) { }
         player = null
+        try { amrPlayer?.stop() } catch (_: Exception) { }
+        try { amrPlayer?.release() } catch (_: Exception) { }
+        amrPlayer = null
+        amrDecoder?.release()
+        amrDecoder = null
         relay.disconnect()
     }
 
@@ -380,6 +452,7 @@ class VoiceService : Service() {
             packGone = false
             ensurePlayer()
             try { this@VoiceService.player?.play() } catch (_: Exception) { }
+            try { this@VoiceService.amrPlayer?.play() } catch (_: Exception) { }
             if (!muted && micPermissionGranted) startCapture()
             updateNotification()
             listener?.onLinked(player) ?: Unit
@@ -391,6 +464,7 @@ class VoiceService : Service() {
             packGone = true
             stopCapture()
             try { player?.pause() } catch (_: Exception) { }
+            try { amrPlayer?.pause() } catch (_: Exception) { }
             updateNotification()
             listener?.onPackGone()
         }
@@ -417,8 +491,23 @@ class VoiceService : Service() {
         }
 
         override fun onAudio(bytes: ByteArray) {
-            ensurePlayer()
-            try { player?.write(bytes, 0, bytes.size) } catch (_: Exception) { }
+            if (AmrCodec.isAmrFrame(bytes)) {
+                // v8 AMR frame: decode to 8 kHz PCM. Decoder is created
+                // lazily; if this device lacks it, the frame is dropped
+                // (both test phones run v8, so this should not happen).
+                try {
+                    if (amrDecoder == null) amrDecoder = AmrDecoder()
+                    val pcm = amrDecoder?.decode(bytes.copyOfRange(4, bytes.size)) ?: ByteArray(0)
+                    if (pcm.isNotEmpty()) {
+                        ensureAmrPlayer()
+                        try { amrPlayer?.write(pcm, 0, pcm.size) } catch (_: Exception) { }
+                    }
+                } catch (_: Exception) { }
+            } else {
+                // Legacy raw PCM 16 kHz from an older app version.
+                ensurePlayer()
+                try { player?.write(bytes, 0, bytes.size) } catch (_: Exception) { }
+            }
         }
     }
 }
