@@ -53,6 +53,16 @@ import java.util.concurrent.TimeUnit
  *   speakerphone on: USAGE_VOICE_COMMUNICATION alone routes to the
  *   earpiece on some phones).
  *
+ * Audio, app v10 (link-gated mic + cutting round 3):
+ * - The mic now starts ONLY when the pack links (onLinked = player
+ *   actually in the server). Pressing Connect no longer runs the mic
+ *   — or its indicator dot — before server entry, matching the
+ *   relay's mic gate at the source instead of only at the relay.
+ * - v9's silent re-prime wait is REMOVED: it slept up to 300 ms
+ *   without feeding the track, which made gaps longer, not shorter.
+ *   The track buffer + repeat-last-frame concealment is the cushion;
+ *   playback resumes on the first frame.
+ *
  * AUTO START / STOP, exactly as the player asked (app v6):
  * - The service loads the saved name, URL and range from preferences on
  *   start, so it works even when it was started by the boot receiver
@@ -123,6 +133,10 @@ class VoiceService : Service() {
     // The linked pack closed (player left the server, game still open):
     // audio is paused but the session stays, so a rejoin re-links.
     private var packGone = false
+    // v10: true only while the pack has linked this app session
+    // (player actually in the server). The mic gate: capture starts
+    // on onLinked, never on hello_ok alone.
+    @Volatile private var appLinked = false
     // Debounce for the mic-flicker bug (v5): the old watcher paused the
     // mic on a single 5s poll where the game looked absent (shade
     // pull-down, app switch, usage-stats lag), so the mic indicator
@@ -211,7 +225,7 @@ class VoiceService : Service() {
     fun setMuted(m: Boolean) {
         muted = m
         relay.setMuted(m)
-        if (m) stopCapture() else if (micPermissionGranted && !micPausedByGame) startCapture()
+        if (m) stopCapture() else if (micPermissionGranted && !micPausedByGame && appLinked) startCapture()
         updateNotification()
     }
 
@@ -234,7 +248,7 @@ class VoiceService : Service() {
                         if (!relay.isConnected) relay.connect(savedUrl, savedName, savedRange)
                         if (micPausedByGame) {
                             micPausedByGame = false
-                            if (!muted) startCapture()
+                            if (!muted && appLinked) startCapture()
                         }
                     }
                     GameWatcher.isAppForeground(this@VoiceService) -> {
@@ -368,7 +382,6 @@ class VoiceService : Service() {
         ensureAmrPlayer()
         playoutThread = Thread {
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-            var starved = true
             var repeatCount = 0
             while (playoutRunning) {
                 if (playoutPaused) {
@@ -376,16 +389,10 @@ class VoiceService : Service() {
                     try { playoutQueue.poll(50, TimeUnit.MILLISECONDS) } catch (_: Exception) { }
                     continue
                 }
-                if (starved) {
-                    // Re-prime with ~60 ms of audio before resuming, so
-                    // the next jitter spike does not underrun at once.
-                    var waited = 0
-                    while (playoutQueue.size < 3 && waited < 15 && playoutRunning && !playoutPaused) {
-                        try { Thread.sleep(20) } catch (_: Exception) { }
-                        waited++
-                    }
-                    starved = false
-                }
+                // v10: NO silent re-prime wait — the v9 wait slept up
+                // to 300 ms without feeding the track, which made gaps
+                // longer. The track buffer + PLC below is the cushion;
+                // playback resumes on the first frame.
                 // Latency snowball guard: never hold more than ~300 ms.
                 while (playoutQueue.size > 15) playoutQueue.poll()
                 val chunk = try { playoutQueue.poll(20, TimeUnit.MILLISECONDS) } catch (_: Exception) { null }
@@ -401,7 +408,6 @@ class VoiceService : Service() {
                         repeatCount++
                         writeChunk(last)
                     } else {
-                        starved = true
                         val rate = last?.first ?: AmrCodec.SAMPLE_RATE
                         writeChunk(rate to ByteArray(if (rate == AmrCodec.SAMPLE_RATE) 320 else 640))
                     }
@@ -540,7 +546,7 @@ class VoiceService : Service() {
             packGone -> "Left server — voice paused"
             muted -> "Muted"
             currentGroup != null -> "In group: $currentGroup"
-            relay.isConnected -> "Connected as $savedName"
+            relay.isConnected -> if (appLinked) "Connected as $savedName" else "Connected — mic starts when you enter the server"
             else -> "VoiceChat idle"
         }
         manager?.notify(NOTIFICATION_ID, buildNotification(text))
@@ -556,6 +562,7 @@ class VoiceService : Service() {
         }
 
         override fun onDisconnected() {
+            appLinked = false
             stopCapture()
             updateNotification()
             listener?.onDisconnected()
@@ -563,7 +570,10 @@ class VoiceService : Service() {
 
         override fun onHelloOk(name: String, proximity: Int) {
             packGone = false
-            if (!muted && micPermissionGranted) startCapture()
+            // v10: do NOT start the mic here. The mic starts only when
+            // the pack links (onLinked = player actually in the server),
+            // so pressing Connect never runs the mic — or its indicator
+            // dot — before server entry.
             updateNotification()
             listener?.onHelloOk(name, proximity)
         }
@@ -573,6 +583,7 @@ class VoiceService : Service() {
         override fun onLinked(player: String) {
             // Rejoin: the pack is back, resume audio at once.
             packGone = false
+            appLinked = true
             playoutPaused = false
             playoutQueue.clear()
             ensurePlayer()
@@ -587,6 +598,7 @@ class VoiceService : Service() {
             // Player left the server, game still open: stop audio, keep
             // the session, so a rejoin re-links and audio resumes.
             packGone = true
+            appLinked = false
             playoutPaused = true
             playoutQueue.clear()
             stopCapture()
