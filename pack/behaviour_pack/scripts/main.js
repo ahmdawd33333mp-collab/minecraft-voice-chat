@@ -25,9 +25,9 @@
 //   This replaces the old "Speaking: X" action-bar text.
 // - DOES offer in-game voice controls WITHOUT leaving the game:
 //   ONE command, /s, opens the groups panel (create/browse groups,
-//   normal range with a free number, global toggle). A Voice Menu
-//   item (echo shard, given on join) opens the same panel on
-//   right-click. A resource-pack HUD button like Java mods have
+//   normal range with a free number, global toggle); /c toggles
+//   mute, /cc opens the panel. A resource-pack HUD button like
+//   Java mods have
 //   cannot do this on Bedrock: client UI cannot reach the script
 //   or the relay, so the item + /s panel are the working
 //   equivalents. (Earlier /v, /vglobal and /vgroup commands were
