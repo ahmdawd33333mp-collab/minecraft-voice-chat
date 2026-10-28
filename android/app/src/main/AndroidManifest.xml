@@ -9,12 +9,10 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Foreground service that keeps mic + playback alive while playing. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <!-- Floating mute button drawn over Minecraft while playing. The user
-         grants this once on the system overlay-permission screen; the app
-         never draws anything without that grant. -->
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Restart the service after a reboot when auto-start is on. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Usage access: NOT granted by the app. The user grants it in Settings,
          which is the only way UsageStatsManager can see the foreground app.
          Declared here so the check in GameWatcher works; the grant itself
@@ -25,7 +23,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="VoiceChat"
+        android:label="ميكروفون ماين كرافت"
         android:theme="@style/Theme.AppCompat.Light.NoActionBar">
         <activity
             android:name=".MainActivity"
@@ -39,5 +37,12 @@
             android:name=".VoiceService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>
