@@ -73,6 +73,22 @@ import java.util.concurrent.TimeUnit
  *   than cutting. This is the app-only answer to TCP stalls; UDP
  *   stays the fallback if real-world stalls exceed ~300 ms.
  *
+ * Audio, app v12 (game-lag fix + new icon):
+ * - Playback moved off the phone-call audio path: USAGE_MEDIA instead
+ *   of USAGE_VOICE_COMMUNICATION, and MODE_IN_COMMUNICATION is no
+ *   longer set. The call path forced game audio through the call
+ *   mixer and is the prime suspect for the game lagging on both
+ *   phones while the app ran (charger unplugged: still lagged).
+ *   Media usage still plays from the loudspeaker by default, so
+ *   the v9 volume fix should survive. Possible cost: the media
+ *   path's larger buffers may add ~100 ms of voice delay on top
+ *   of v11's 250 ms. If the game still lags on v12, the next
+ *   step is the game-sound-off test + profiling, not another
+ *   routing guess.
+ * - Launcher icon: blocky Minecraft-style player holding a
+ *   microphone (was the default Android robot: the manifest set
+ *   no android:icon at all).
+ *
  * AUTO START / STOP, exactly as the player asked (app v6):
  * - The service loads the saved name, URL and range from preferences on
  *   start, so it works even when it was started by the boot receiver
@@ -382,12 +398,15 @@ class VoiceService : Service() {
     private fun ensurePlayoutThread() {
         if (playoutRunning) return
         playoutRunning = true
-        // Force loudspeaker routing: USAGE_VOICE_COMMUNICATION alone
-        // routes to the earpiece on some phones — the second phone's
-        // "weak sound". A connected headset still wins over this flag.
+        // v12: NO voice-call audio mode. MODE_IN_COMMUNICATION (v9)
+        // forced every stream — game audio included — through the
+        // phone-call mixer, and the game lagged on both phones while
+        // the app ran (unplugging the charger did not help, so it is
+        // not heat). Media usage routes to the loudspeaker by
+        // default, so the second phone's volume fix survives without
+        // the call path. A connected headset still wins over this flag.
         try {
             val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            am.mode = AudioManager.MODE_IN_COMMUNICATION
             am.isSpeakerphoneOn = true
         } catch (_: Exception) { }
         // Tracks exist before any audio arrives, so the playout thread
@@ -463,8 +482,8 @@ class VoiceService : Service() {
         player = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                     .build()
             )
             .setAudioFormat(
@@ -489,8 +508,8 @@ class VoiceService : Service() {
         amrPlayer = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                     .build()
             )
             .setAudioFormat(
