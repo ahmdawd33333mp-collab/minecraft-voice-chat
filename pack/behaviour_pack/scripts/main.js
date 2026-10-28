@@ -2,6 +2,8 @@
 // v16: mute/unmute relay sends deferred via system.run — direct sends
 // from command callbacks throw "restricted execution" (Bedrock forbids
 // network sends in a "before" context), so the relay never got mutes.
+// v17: no link mark above the head — the player asked for no dot on
+// Connect; link status lives in the app, not the nametag.
 // Bedrock 1.26.x, Beta APIs, BDS only. @minecraft/server-net is
 // pre-release and only works on Bedrock Dedicated Server, not on the
 // game client and not on Realms.
@@ -271,7 +273,8 @@ function applyNameTag(player) {
     let tag = base;
     if (!mutedNames.has(base)) {
         if ((speakingUntil.get(base) || 0) > Date.now()) tag = `${MIC_ICON} ${base}`;
-        else if (linkedNames.has(base)) tag = `${LINK_ICON} ${base}`;
+        // v17: no link mark here — the player asked for no dot on
+        // Connect. Speaking mark only, while actually speaking.
     }
     try {
         if (player.nameTag !== tag) player.nameTag = tag;
