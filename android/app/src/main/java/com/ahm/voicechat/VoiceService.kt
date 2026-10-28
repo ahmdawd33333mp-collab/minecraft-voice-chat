@@ -5,7 +5,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.PixelFormat
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioRecord
@@ -15,6 +18,12 @@ import android.os.Binder
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.Settings
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
+import android.widget.Button
 import androidx.core.app.NotificationCompat
 
 /**
@@ -59,6 +68,26 @@ class VoiceService : Service() {
     private var captureThread: Thread? = null
     @Volatile private var capturing: Boolean = false
     @Volatile private var micPausedByGame: Boolean = false
+
+    // ---- floating mute button (overlay over Minecraft) ----
+    // A real button, not a pack HUD element: Bedrock HUD buttons cannot
+    // run anything or reach this app, so the button lives in this app as
+    // a system overlay (TYPE_APPLICATION_OVERLAY) drawn over the game,
+    // bottom-centre by default, draggable anywhere. Tap = mute/unmute
+    // through the same setMuted() path as the mic button and the
+    // notification action, so the relay hears about it too.
+    private var windowManager: WindowManager? = null
+    private var overlayButton: Button? = null
+    private var overlayParams: WindowManager.LayoutParams? = null
+    private var overlayShown = false
+    private var overlayEnabled = false
+    private var gameForegroundNow = false
+    // Debounce for the mic-flicker bug (v5): the old watcher paused the
+    // mic on a single 5s poll where the game looked absent (shade
+    // pull-down, app switch, usage-stats lag), so the mic indicator
+    // flickered and audio cut in and out. Now the mic only pauses after
+    // the game has been absent for 3 consecutive polls (~15 seconds).
+    private var gameAbsentPolls = 0
     var muted: Boolean = false
         private set
     var currentGroup: String? = null
@@ -73,6 +102,9 @@ class VoiceService : Service() {
     override fun onCreate() {
         super.onCreate()
         relay = RelayClient(ForwardingListener())
+        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        overlayEnabled = getSharedPreferences("voicechat", Context.MODE_PRIVATE)
+            .getBoolean("overlayEnabled", false)
         createChannel()
         startForeground(NOTIFICATION_ID, buildNotification("VoiceChat idle"))
         startWatcher()
@@ -120,6 +152,20 @@ class VoiceService : Service() {
         relay.setMuted(m)
         if (m) stopCapture() else if (micPermissionGranted && !micPausedByGame) startCapture()
         updateNotification()
+        updateOverlayButton()
+    }
+
+    // ---- floating overlay button: public control ----
+
+    fun isOverlayEnabled(): Boolean = overlayEnabled
+
+    fun canDrawOverlay(): Boolean = Settings.canDrawOverlays(this)
+
+    fun setOverlayEnabled(enabled: Boolean) {
+        overlayEnabled = enabled
+        getSharedPreferences("voicechat", Context.MODE_PRIVATE).edit()
+            .putBoolean("overlayEnabled", enabled).apply()
+        refreshOverlay()
     }
 
     fun requestCode() = relay.requestCode()
@@ -133,23 +179,136 @@ class VoiceService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private val watcherRunnable = object : Runnable {
         override fun run() {
-            if (autoSenseEnabled && savedName.isNotBlank() && savedUrl.isNotBlank() && micPermissionGranted) {
+            if (!autoSenseEnabled) {
+                // Manual connect: the user chose to be connected, so the
+                // overlay shows whenever connected, no game check.
+                gameForegroundNow = true
+            } else if (savedName.isNotBlank() && savedUrl.isNotBlank() && micPermissionGranted) {
                 if (GameWatcher.isGameForeground(this@VoiceService)) {
+                    gameAbsentPolls = 0
+                    gameForegroundNow = true
                     if (!relay.isConnected) relay.connect(savedUrl, savedName, savedRange)
                     if (micPausedByGame) {
                         micPausedByGame = false
                         if (!muted) startCapture()
                     }
                 } else {
+                    // Debounced pause (v5): a single absent poll no longer
+                    // pauses the mic. Only after 3 consecutive absent
+                    // polls (~15s) do we treat the game as really gone.
                     // Pause mic only. Connection stays open (see class comment).
-                    if (capturing) {
-                        micPausedByGame = true
-                        stopCapture()
+                    gameAbsentPolls++
+                    if (gameAbsentPolls >= 3) {
+                        gameForegroundNow = false
+                        if (capturing) {
+                            micPausedByGame = true
+                            stopCapture()
+                        }
                     }
                 }
             }
+            refreshOverlay()
             handler.postDelayed(this, 5_000)
         }
+    }
+
+    // ---- floating overlay button: implementation ----
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).toInt()
+
+    private fun refreshOverlay() {
+        val shouldShow = overlayEnabled && canDrawOverlay() &&
+            relay.isConnected && gameForegroundNow
+        if (shouldShow) showOverlay() else hideOverlay()
+    }
+
+    private fun showOverlay() {
+        if (overlayShown) {
+            updateOverlayButton()
+            return
+        }
+        val wm = windowManager ?: return
+        val size = dp(72)
+        val btn = Button(this)
+        btn.text = if (muted) "\uD83D\uDD07" else "\uD83C\uDFA4"
+        btn.textSize = 26f
+        btn.setTextColor(Color.WHITE)
+        btn.setBackgroundColor(
+            if (muted) Color.argb(200, 200, 60, 60)
+            else Color.argb(200, 40, 160, 60)
+        )
+        val params = WindowManager.LayoutParams(
+            size, size,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        )
+        params.gravity = Gravity.TOP or Gravity.START
+        val dm = resources.displayMetrics
+        params.x = (dm.widthPixels - size) / 2
+        params.y = dm.heightPixels - dp(240)
+        var downX = 0f
+        var downY = 0f
+        var startX = 0
+        var startY = 0
+        var dragged = false
+        btn.setOnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.rawX
+                    downY = event.rawY
+                    startX = params.x
+                    startY = params.y
+                    dragged = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = (event.rawX - downX).toInt()
+                    val dy = (event.rawY - downY).toInt()
+                    if (kotlin.math.abs(dx) > 12 || kotlin.math.abs(dy) > 12) dragged = true
+                    if (dragged) {
+                        params.x = startX + dx
+                        params.y = startY + dy
+                        try { wm.updateViewLayout(btn, params) } catch (_: Exception) { }
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!dragged) setMuted(!muted)
+                    true
+                }
+                else -> false
+            }
+        }
+        try {
+            wm.addView(btn, params)
+            overlayButton = btn
+            overlayParams = params
+            overlayShown = true
+        } catch (_: Exception) {
+            overlayShown = false
+        }
+    }
+
+    private fun hideOverlay() {
+        if (!overlayShown) return
+        try {
+            overlayButton?.let { windowManager?.removeView(it) }
+        } catch (_: Exception) { }
+        overlayButton = null
+        overlayParams = null
+        overlayShown = false
+    }
+
+    private fun updateOverlayButton() {
+        val btn = overlayButton ?: return
+        btn.text = if (muted) "\uD83D\uDD07" else "\uD83C\uDFA4"
+        btn.setBackgroundColor(
+            if (muted) Color.argb(200, 200, 60, 60)
+            else Color.argb(200, 40, 160, 60)
+        )
     }
 
     private fun startWatcher() {
@@ -221,6 +380,7 @@ class VoiceService : Service() {
 
     private fun stopAll() {
         handler.removeCallbacks(watcherRunnable)
+        hideOverlay()
         stopCapture()
         try { player?.stop() } catch (_: Exception) { }
         try { player?.release() } catch (_: Exception) { }
@@ -278,18 +438,21 @@ class VoiceService : Service() {
         override fun onConnected() {
             ensurePlayer()
             updateNotification()
+            refreshOverlay()
             listener?.onConnected()
         }
 
         override fun onDisconnected() {
             stopCapture()
             updateNotification()
+            refreshOverlay()
             listener?.onDisconnected()
         }
 
         override fun onHelloOk(name: String, proximity: Int) {
             if (!muted && micPermissionGranted) startCapture()
             updateNotification()
+            refreshOverlay()
             listener?.onHelloOk(name, proximity)
         }
 
@@ -303,6 +466,7 @@ class VoiceService : Service() {
         override fun onMuteOk(muted: Boolean) {
             this@VoiceService.muted = muted
             updateNotification()
+            updateOverlayButton()
             listener?.onMuteOk(muted)
         }
 
