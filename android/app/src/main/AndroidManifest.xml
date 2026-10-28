@@ -9,6 +9,10 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Foreground service that keeps mic + playback alive while playing. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Floating mute button drawn over Minecraft while playing. The user
+         grants this once on the system overlay-permission screen; the app
+         never draws anything without that grant. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Usage access: NOT granted by the app. The user grants it in Settings,
