@@ -73,7 +73,7 @@ const speakingUntil = new Map(); // player name -> epoch ms of last speaking not
 const linkedNames = new Set(); // player names with a linked voice app
 const mutedNames = new Set(); // player names currently muted (relay told us)
 const SPEAKING_HOLD_MS = 1200; // icon stays this long after the last voice frame
-const MIC_ICON = "🎤";
+const MIC_ICON = "♪";
 const LINK_ICON = "🔗";
 
 function findPlayer(name) {
@@ -127,6 +127,10 @@ async function openGroupsMenu(player) {
     form.button("Browse groups");
     form.button("Normal range (blocks)");
     form.button(st.global ? "Global voice: turn OFF" : "Global voice: turn ON");
+    // v18: leave button, only while in a group — group routing beats
+    // proximity, so a player stuck in a group the other never joined
+    // hears nothing even standing together.
+    if (st.group) form.button(`Leave group "${st.group}"`);
     let res;
     try {
         res = await form.show(player);
@@ -148,6 +152,10 @@ async function openGroupsMenu(player) {
     if (res.selection === 2) { system.runTimeout(() => { openRangeForm(player); }, 5); return; }
     if (res.selection === 3) {
         if (!sendJson(player.name, { type: "global", global: !st.global })) player.sendMessage("VoiceChat: relay is not connected — try again in a few seconds.");
+        return;
+    }
+    if (res.selection === 4) {
+        if (!sendJson(player.name, { type: "group_leave" })) player.sendMessage("VoiceChat: relay is not connected — try again in a few seconds.");
         return;
     }
 }
@@ -263,8 +271,8 @@ function removeMenuItem(player) {
 }
 
 // Nametag scheme (replaces the old "Speaking: X" action-bar text):
-// - speaking -> mic icon above the head: "🎤 name"
-// - linked, silent -> connection mark: "🔗 name"
+// - speaking -> note mark above the head: "♪ name"
+// - linked, silent -> plain name (v17: no link mark)
 // - muted -> plain name, nothing at all
 // (Bedrock shows the same nametag in chat and the player list too;
 // there is no separate above-head-only name on BDS.)
