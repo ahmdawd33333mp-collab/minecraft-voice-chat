@@ -24,9 +24,9 @@
 //   silent, and a plain name while he is muted (no icon at all).
 //   This replaces the old "Speaking: X" action-bar text.
 // - DOES offer in-game voice controls WITHOUT leaving the game:
-//   ONE command, /s, opens the groups panel (create/browse groups,
-//   normal range with a free number, global toggle); /c toggles
-//   mute, /cc opens the panel. A resource-pack HUD button like
+//   voice:ahmdl opens the groups panel (create/browse groups,
+//   normal range with a free number, global toggle); voice:ahmdf
+//   mutes, voice:ahmdn unmutes. A resource-pack HUD button like
 //   Java mods have
 //   cannot do this on Bedrock: client UI cannot reach the script
 //   or the relay, so the item + /s panel are the working
@@ -91,9 +91,9 @@ function stateFor(name) {
 }
 
 // ---- In-game menus (no leaving the game) ----
-// The ONLY menu is /s (groups panel). No /v menu and no /v commands
-// remain — /s covers range, global and groups; /c mutes, /cc
-// unmutes. Mute also stays on the app mic button and its
+// The ONLY menu is the groups panel (voice:ahmdl). No /v menu and no
+// old commands remain — the panel covers range, global and groups;
+// voice:ahmdf mutes, voice:ahmdn unmutes. Mute also stays on the app mic button and its
 // notification actions. (The old Voice Menu item was removed on
 // the player's order; MENU_ITEM_* below only identify leftovers to
 // clean out of inventories.)
@@ -103,15 +103,18 @@ function stateFor(name) {
 const MENU_ITEM_ID = "minecraft:echo_shard";
 const MENU_ITEM_NAME = "Voice Menu";
 
-// ---- Groups panel (/s): the only menu ----
+// ---- Groups panel (voice:ahmdl): the only menu ----
 async function openGroupsMenu(player) {
     if (!ActionFormData) {
         player.sendMessage("VoiceChat: forms are unavailable on this server build.");
         return;
     }
+    const st = stateFor(player.name);
     const form = new ActionFormData();
     form.title("VoiceChat: groups");
-    form.body("Create a group, or browse existing groups and join one.");
+    form.body(st.group
+        ? `You are in group "${st.group}" — members hear each other anywhere.\nCreate a group, or browse existing groups and join one.`
+        : "No group — proximity mode (set the range below).\nCreate a group, or browse existing groups and join one.");
     form.button("Create group");
     form.button("Browse groups");
     form.button("Normal range (blocks)");
@@ -119,15 +122,21 @@ async function openGroupsMenu(player) {
     try {
         res = await form.show(player);
     } catch {
+        player.sendMessage("VoiceChat: could not open the panel — try again.");
         return;
     }
     if (res.canceled) return;
-    if (res.selection === 0) return openCreateGroupPanel(player);
+    // Chained forms must be deferred to the next tick (system.run):
+    // opening a second form straight from a form's response can fail
+    // silently on this build — the same class of bug as the old
+    // command-to-panel failure that v13 fixed with a deferral. This
+    // is what made "Normal range (blocks)" show nothing.
+    if (res.selection === 0) { system.run(() => { openCreateGroupPanel(player); }); return; }
     if (res.selection === 1) {
         sendJson(player.name, { type: "group_list" });
         return;
     }
-    if (res.selection === 2) return openRangeForm(player);
+    if (res.selection === 2) { system.run(() => { openRangeForm(player); }); return; }
 }
 
 // Groups are ALWAYS unlimited: members hear each other wherever
@@ -143,6 +152,7 @@ async function openCreateGroupPanel(player) {
     try {
         res = await form.show(player);
     } catch {
+        player.sendMessage("VoiceChat: could not open the form — try again.");
         return;
     }
     if (res.canceled) return;
@@ -200,6 +210,7 @@ async function openRangeForm(player) {
     try {
         res = await form.show(player);
     } catch {
+        player.sendMessage("VoiceChat: could not open the range form — try again.");
         return;
     }
     if (res.canceled) return;
@@ -207,8 +218,11 @@ async function openRangeForm(player) {
     const n = Math.floor(Number(rangeText));
     // Range first, global second: the relay clears global when a
     // range is set, so sending global last makes it win when on.
-    if (Number.isFinite(n) && n >= 1) sendJson(player.name, { type: "range", range: Math.min(2000, n) });
-    if (globalOn !== st.global) sendJson(player.name, { type: "global", global: globalOn });
+    // Never fail silently: if the relay socket is down, say so.
+    let sent = true;
+    if (Number.isFinite(n) && n >= 1) sent = sendJson(player.name, { type: "range", range: Math.min(2000, n) }) && sent;
+    if (globalOn !== st.global) sent = sendJson(player.name, { type: "global", global: globalOn }) && sent;
+    if (!sent) player.sendMessage("VoiceChat: relay is not connected — try again in a few seconds.");
 }
 
 // The Voice Menu item was REMOVED on the player's order. This only
@@ -401,12 +415,24 @@ function disconnectPlayer(playerName) {
     voiceState.delete(playerName);
 }
 
-// ---- Custom chat command (/s only) ----
+// ---- Custom chat commands (player's own names, v14) ----
 // NOTE: this is NOT a chatSend interception (Mojang removed that
 // event) — it is a real command registered with the script API's
 // custom command registry, so it works from the chat box like any
 // command, with cheats NOT required and permission level Any, meaning
 // every player can use it, not just operators.
+// NAMESPACE LAW (proven by console errors, do NOT re-add variants):
+// custom commands MUST be namespaced, and every command in one
+// registry must share the SAME namespace ("voice"). Bare names
+// (ahmdf) are rejected with NamespaceNameError, and reversed names
+// (ahmdf:voice) are rejected with "namespaces must match". So ONLY
+// voice:ahmdf / voice:ahmdn / voice:ahmdl exist. Type the full name
+// by hand; do NOT tap the autocomplete suggestion — tapping sends
+// the reversed name and the game answers "Unknown command".
+// v14: all old commands (c, cc, s, v and every variant) were REMOVED
+// on the player's order. The replacements, same Any permission:
+//   voice:ahmdf = mute only, voice:ahmdn = unmute only,
+//   voice:ahmdl = open the groups panel.
 system.beforeEvents.startup.subscribe((event) => {
     const registry = event.customCommandRegistry;
     if (!registry) return;
@@ -424,56 +450,39 @@ system.beforeEvents.startup.subscribe((event) => {
     const fail = (message) => ({ status: CustomCommandStatus.Failure, message });
     const noRelay = () => fail("VoiceChat: relay is not connected — try again in a few seconds.");
     const notPlayer = () => fail("VoiceChat: run this in game as a player.");
-    // /s is the main command. /v, /vglobal and /vgroup were removed
-    // on the player's order — everything they did lives in the /s
-    // panel (range + global toggle under Normal range, groups under
-    // Create/Browse), so nothing is lost by removing them.
-    // /c mutes, /cc unmutes ("opens the mic"), /s opens the panel —
-    // explicit commands, no toggle guessing, same Any permission,
-    // no cheats required.
-    // NOTE: the chat autocomplete shows the short name (c, cc, s) but
-    // tapping the suggestion sends the name REVERSED (c:voice, not
-    // voice:c — seen live as "Unknown command: s:voice"). So every
-    // command is registered in BOTH directions: voice:c and c:voice,
-    // voice:cc and cc:voice, voice:s and s:voice. Tapping the
-    // suggestion and typing the full name then both work.
-    const cDef = (name) => ({
+    const muteDef = (name) => ({
         name,
         description: "VoiceChat: mute your mic",
         cheatsRequired: false,
         permissionLevel: CommandPermissionLevel.Any,
     });
-    const cCb = (origin) => {
+    const muteCb = (origin) => {
         const player = playerOf(origin);
         if (!player) return notPlayer();
         if (!sendJson(player.name, { type: "mute", muted: true })) return noRelay();
         return undefined;
     };
-    register("c", cDef("c"), cCb);
-    register("voice:c", cDef("voice:c"), cCb);
-    register("c:voice", cDef("c:voice"), cCb);
-    const ccDef = (name) => ({
+    register("voice:ahmdf", muteDef("voice:ahmdf"), muteCb);
+    const unmuteDef = (name) => ({
         name,
         description: "VoiceChat: unmute your mic",
         cheatsRequired: false,
         permissionLevel: CommandPermissionLevel.Any,
     });
-    const ccCb = (origin) => {
+    const unmuteCb = (origin) => {
         const player = playerOf(origin);
         if (!player) return notPlayer();
         if (!sendJson(player.name, { type: "mute", muted: false })) return noRelay();
         return undefined;
     };
-    register("cc", ccDef("cc"), ccCb);
-    register("voice:cc", ccDef("voice:cc"), ccCb);
-    register("cc:voice", ccDef("cc:voice"), ccCb);
-    const sDef = (name) => ({
+    register("voice:ahmdn", unmuteDef("voice:ahmdn"), unmuteCb);
+    const panelDef = (name) => ({
         name,
         description: "VoiceChat: open the groups panel (create or browse groups)",
         cheatsRequired: false,
         permissionLevel: CommandPermissionLevel.Any,
     });
-    const sCb = (origin) => {
+    const panelCb = (origin) => {
         const player = playerOf(origin);
         if (!player) return notPlayer();
         // Command callbacks run in a "before" context where opening a
@@ -483,9 +492,7 @@ system.beforeEvents.startup.subscribe((event) => {
         system.run(() => { openGroupsMenu(player); });
         return undefined;
     };
-    register("s", sDef("s"), sCb);
-    register("voice:s", sDef("voice:s"), sCb);
-    register("s:voice", sDef("s:voice"), sCb);
+    register("voice:ahmdl", panelDef("voice:ahmdl"), panelCb);
 });
 
 // Reconnect players that are online but have no socket, and send
@@ -538,7 +545,7 @@ world.afterEvents.playerLeave.subscribe((event) => {
 });
 
 // (The Voice Menu item handler was removed with the item itself:
-// /s and /cc are now the only ways to open the panel.)
+// voice:ahmdl is now the only way to open the panel.)
 
 // NO CHAT COMMANDS ON 1.26.52 — DO NOT RE-ADD THEM.
 // world.beforeEvents.chatSend does not exist on this build (it was
