@@ -24,6 +24,8 @@
     <application
         android:allowBackup="true"
         android:label="ميكروفون ماين كرافت"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:theme="@style/Theme.AppCompat.Light.NoActionBar">
         <activity
             android:name=".MainActivity"
