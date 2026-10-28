@@ -41,8 +41,8 @@ object GameWatcher {
         return mode == AppOpsManager.MODE_ALLOWED
     }
 
-    /** Returns true only if Minecraft was the most recently used app in the window. */
-    fun isGameForeground(context: Context): Boolean {
+    /** Returns true only if the given package was the most recently used app in the window. */
+    fun isForegroundPackage(context: Context, pkg: String): Boolean {
         if (!hasUsageAccess(context)) return false
         val usage = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
         val now = System.currentTimeMillis()
@@ -53,6 +53,14 @@ object GameWatcher {
             now
         ) ?: return false
         val latest = stats.maxByOrNull { it.lastTimeUsed } ?: return false
-        return latest.packageName == MINECRAFT_PACKAGE
+        return latest.packageName == pkg
     }
+
+    /** Returns true only if Minecraft was the most recently used app in the window. */
+    fun isGameForeground(context: Context): Boolean =
+        isForegroundPackage(context, MINECRAFT_PACKAGE)
+
+    /** True when this app itself is foreground (user looking at it). */
+    fun isAppForeground(context: Context): Boolean =
+        isForegroundPackage(context, context.packageName)
 }
