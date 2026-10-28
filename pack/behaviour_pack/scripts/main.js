@@ -19,8 +19,10 @@
 //   crashes at load and nothing in the pack runs. So v4 subscribes to
 //   NOTHING chat-related: playerSpawn, playerLeave and runInterval
 //   only. Do NOT re-add a chatSend subscription on 1.26.52.
-// - DOES surface relay messages it receives on a player's socket
-//   (for example a "speaking" notice) as an in-game action bar line.
+// - DOES show voice state on nametags: a mic icon above a player
+//   while he speaks, a link mark while his app is connected and
+//   silent, and a plain name while he is muted (no icon at all).
+//   This replaces the old "Speaking: X" action-bar text.
 // - Does NOT capture microphone audio. Does NOT play live voice.
 //   Bedrock packs play only pre-bundled sounds; live voice capture
 //   and playback live in the Android app only. Any claim otherwise
@@ -50,6 +52,37 @@ const RELAY_URL = "wss://minecraft-voice-relay.onrender.com";
 // overwrite positions — hence one socket per player.
 const sockets = new Map(); // player name -> WebSocketClient
 const lastSent = new Map(); // player name -> tick of last position send
+const speakingUntil = new Map(); // player name -> epoch ms of last speaking notice
+const linkedNames = new Set(); // player names with a linked voice app
+const mutedNames = new Set(); // player names currently muted (relay told us)
+const SPEAKING_HOLD_MS = 1200; // icon stays this long after the last voice frame
+const MIC_ICON = "🎤";
+const LINK_ICON = "🔗";
+
+function findPlayer(name) {
+    for (const p of world.getAllPlayers()) {
+        if (p.name === name) return p;
+    }
+    return undefined;
+}
+
+// Nametag scheme (replaces the old "Speaking: X" action-bar text):
+// - speaking -> mic icon above the head: "🎤 name"
+// - linked, silent -> connection mark: "🔗 name"
+// - muted -> plain name, nothing at all
+// (Bedrock shows the same nametag in chat and the player list too;
+// there is no separate above-head-only name on BDS.)
+function applyNameTag(player) {
+    const base = player.name;
+    let tag = base;
+    if (!mutedNames.has(base)) {
+        if ((speakingUntil.get(base) || 0) > Date.now()) tag = `${MIC_ICON} ${base}`;
+        else if (linkedNames.has(base)) tag = `${LINK_ICON} ${base}`;
+    }
+    try {
+        if (player.nameTag !== tag) player.nameTag = tag;
+    } catch { /* nameTag read-only on some builds; icons just stay off */ }
+}
 
 function dimensionName(id) {
     if (id === "minecraft:nether") return "nether";
@@ -95,12 +128,28 @@ async function connectPlayer(player) {
                         const text = typeof event === "string" ? event : event.message;
                         const msg = JSON.parse(text);
                         if (msg.type === "speaking" && msg.from) {
-                            player.onScreenDisplay.setActionBar(`Speaking: ${msg.from}`);
+                            // Mic icon above the SPEAKER's head. The
+                            // notice arrives on the listener's socket,
+                            // but this script runs server-wide, so it
+                            // can set the speaker's nametag directly.
+                            speakingUntil.set(msg.from, Date.now() + SPEAKING_HOLD_MS);
+                            const speaker = findPlayer(msg.from);
+                            if (speaker) applyNameTag(speaker);
+                        }
+                        if (msg.type === "mute" && msg.player) {
+                            if (msg.muted) mutedNames.add(msg.player);
+                            else mutedNames.delete(msg.player);
+                            const p = findPlayer(msg.player);
+                            if (p) applyNameTag(p);
                         }
                         if (msg.type === "mute_ok") {
                             player.sendMessage(`VoiceChat: mic ${msg.muted ? "muted" : "unmuted"} (relay confirmed).`);
                         }
                         if (msg.type === "link_ok") {
+                            if (msg.ok) {
+                                linkedNames.add(player.name);
+                                applyNameTag(player);
+                            }
                             player.sendMessage(
                                 msg.ok
                                     ? `VoiceChat: voice linked for ${msg.player}. Speak — nearby players on your chosen range will hear you.`
@@ -129,6 +178,9 @@ function disconnectPlayer(playerName) {
     }
     sockets.delete(playerName);
     lastSent.delete(playerName);
+    speakingUntil.delete(playerName);
+    linkedNames.delete(playerName);
+    mutedNames.delete(playerName);
 }
 
 // Reconnect players that are online but have no socket, and send
@@ -150,6 +202,19 @@ system.runInterval(() => {
         lastSent.set(player.name, system.currentTick);
     }
 }, 20);
+
+// Clear stale mic icons twice a second: a muted sender sends no
+// frames at all, so its icon drops here even without a mute message.
+system.runInterval(() => {
+    const now = Date.now();
+    for (const player of world.getAllPlayers()) {
+        const until = speakingUntil.get(player.name) || 0;
+        if (until && until <= now) {
+            speakingUntil.delete(player.name);
+            applyNameTag(player);
+        }
+    }
+}, 10);
 
 world.afterEvents.playerSpawn.subscribe((event) => {
     connectPlayer(event.player);
