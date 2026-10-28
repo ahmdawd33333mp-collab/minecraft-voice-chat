@@ -112,12 +112,16 @@ async function openGroupsMenu(player) {
     const st = stateFor(player.name);
     const form = new ActionFormData();
     form.title("VoiceChat: groups");
-    form.body(st.group
-        ? `You are in group "${st.group}" — members hear each other anywhere.\nCreate a group, or browse existing groups and join one.`
-        : "No group — proximity mode (set the range below).\nCreate a group, or browse existing groups and join one.");
+    const statusLines = [];
+    if (st.group) statusLines.push(`Group: "${st.group}" — members hear each other anywhere.`);
+    else statusLines.push("No group — proximity mode.");
+    statusLines.push(`Global voice: ${st.global ? "ON" : "OFF"}.`);
+    if (!st.group && !st.global && st.range) statusLines.push(`Range: ${st.range} blocks.`);
+    form.body(statusLines.join("\n") + "\nCreate a group, or browse existing groups and join one.");
     form.button("Create group");
     form.button("Browse groups");
     form.button("Normal range (blocks)");
+    form.button(st.global ? "Global voice: turn OFF" : "Global voice: turn ON");
     let res;
     try {
         res = await form.show(player);
@@ -126,17 +130,21 @@ async function openGroupsMenu(player) {
         return;
     }
     if (res.canceled) return;
-    // Chained forms must be deferred to the next tick (system.run):
-    // opening a second form straight from a form's response can fail
-    // silently on this build — the same class of bug as the old
-    // command-to-panel failure that v13 fixed with a deferral. This
-    // is what made "Normal range (blocks)" show nothing.
+    // Chained forms must be deferred: opening a second form straight
+    // from a form's response can fail silently on this build — the
+    // same class of bug as the old command-to-panel failure that v13
+    // fixed with a deferral. The range form gets a 5-tick delay as
+    // belt-and-braces on top of the deferral.
     if (res.selection === 0) { system.run(() => { openCreateGroupPanel(player); }); return; }
     if (res.selection === 1) {
         sendJson(player.name, { type: "group_list" });
         return;
     }
-    if (res.selection === 2) { system.run(() => { openRangeForm(player); }); return; }
+    if (res.selection === 2) { system.runTimeout(() => { openRangeForm(player); }, 5); return; }
+    if (res.selection === 3) {
+        if (!sendJson(player.name, { type: "global", global: !st.global })) player.sendMessage("VoiceChat: relay is not connected — try again in a few seconds.");
+        return;
+    }
 }
 
 // Groups are ALWAYS unlimited: members hear each other wherever
@@ -199,13 +207,16 @@ async function openGroupListForm(player, names) {
     sendJson(player.name, { type: "group_join", name, password: pw });
 }
 
+// v15: the range form is deliberately a SINGLE plain text field —
+// exactly like the password form, which is proven to open on this
+// build. The old form (prefilled text field + global toggle) never
+// rendered, so both suspects are gone: global moved to its own menu
+// button, and the field carries no prefilled default.
 async function openRangeForm(player) {
     if (!ModalFormData) return;
-    const st = stateFor(player.name);
     const form = new ModalFormData();
     form.title("VoiceChat: range");
-    form.textField("Range in blocks (1-2000)", "e.g. 50", st.range ? String(st.range) : "");
-    form.toggle("Global — heard anywhere in the world", st.global);
+    form.textField("Range in blocks (1-2000)", "e.g. 50");
     let res;
     try {
         res = await form.show(player);
@@ -214,15 +225,13 @@ async function openRangeForm(player) {
         return;
     }
     if (res.canceled) return;
-    const [rangeText, globalOn] = res.formValues;
+    const [rangeText] = res.formValues;
     const n = Math.floor(Number(rangeText));
-    // Range first, global second: the relay clears global when a
-    // range is set, so sending global last makes it win when on.
-    // Never fail silently: if the relay socket is down, say so.
-    let sent = true;
-    if (Number.isFinite(n) && n >= 1) sent = sendJson(player.name, { type: "range", range: Math.min(2000, n) }) && sent;
-    if (globalOn !== st.global) sent = sendJson(player.name, { type: "global", global: globalOn }) && sent;
-    if (!sent) player.sendMessage("VoiceChat: relay is not connected — try again in a few seconds.");
+    if (!Number.isFinite(n) || n < 1) {
+        player.sendMessage("VoiceChat: enter a number of blocks (1-2000).");
+        return;
+    }
+    if (!sendJson(player.name, { type: "range", range: Math.min(2000, n) })) player.sendMessage("VoiceChat: relay is not connected — try again in a few seconds.");
 }
 
 // The Voice Menu item was REMOVED on the player's order. This only
