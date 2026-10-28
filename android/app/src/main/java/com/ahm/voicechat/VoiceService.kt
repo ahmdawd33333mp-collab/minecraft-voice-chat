@@ -1,5 +1,6 @@
 package com.ahm.voicechat
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
@@ -7,8 +8,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
-import android.graphics.PixelFormat
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioRecord
@@ -18,13 +18,8 @@ import android.os.Binder
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.provider.Settings
-import android.view.Gravity
-import android.view.MotionEvent
-import android.view.View
-import android.view.WindowManager
-import android.widget.Button
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 
 /**
  * Foreground service: owns the relay connection, mic capture and playback.
@@ -33,17 +28,31 @@ import androidx.core.app.NotificationCompat
  * beyond what the platform provides. Frames are sent as binary WebSocket
  * messages; the relay forwards them opaquely.
  *
- * AUTO-SENSE + PAUSE behaviour, exactly as documented in README.md:
- * - Poll every 5 seconds while the service runs.
- * - Game foreground + name + URL saved + mic permission + auto-sense on
- *   -> connect (if needed) and start mic capture.
- * - Game leaves foreground -> PAUSE mic capture immediately, but DO NOT
- *   disconnect the WebSocket. Playback keeps working while paused, so a
- *   player who alt-tabs briefly still hears others.
- * - Game returns -> resume mic capture automatically (unless muted).
+ * AUTO START / STOP, exactly as the player asked (app v6):
+ * - The service loads the saved name, URL and range from preferences on
+ *   start, so it works even when it was started by the boot receiver
+ *   without the app ever being opened.
+ * - Poll every 5 seconds while the service runs (auto-sense on only).
+ * - Game foreground + saved name + mic permission -> connect (if needed)
+ *   and start mic capture. This is also how a late Connect works: the
+ *   player can already be inside a server, press Connect with his name,
+ *   and the relay links him to the pack that is already in the world.
+ * - Game absent for 3 consecutive polls (~15 seconds) -> FULL STOP:
+ *   mic capture stops and the relay disconnects. The service itself
+ *   keeps watching, so re-entering the game auto-connects again within
+ *   seconds. A brief alt-tab (under ~15s) does not stop anything.
+ * - Pack socket closed (player left the server while the game is still
+ *   open) -> the relay sends pack_gone: audio stops, the session stays,
+ *   so rejoining the server re-links instantly and audio resumes.
+ * - Auto-sense OFF (manual mode): none of the above applies; the user
+ *   connects and disconnects by hand and the connection stays.
  * - Service stopped (app swiped away / Stop pressed) -> disconnect, stop
  *   capture and playback. Reconnecting is a fresh session; the relay
  *   drops group membership on close, so the player must re-join a group.
+ *
+ * The floating overlay mute button from v5 is GONE (app v6): voice is
+ * now controlled from inside the game (/c, /cc, /s), so no overlay
+ * permission is needed anymore.
  */
 class VoiceService : Service() {
 
@@ -68,20 +77,9 @@ class VoiceService : Service() {
     private var captureThread: Thread? = null
     @Volatile private var capturing: Boolean = false
     @Volatile private var micPausedByGame: Boolean = false
-
-    // ---- floating mute button (overlay over Minecraft) ----
-    // A real button, not a pack HUD element: Bedrock HUD buttons cannot
-    // run anything or reach this app, so the button lives in this app as
-    // a system overlay (TYPE_APPLICATION_OVERLAY) drawn over the game,
-    // bottom-centre by default, draggable anywhere. Tap = mute/unmute
-    // through the same setMuted() path as the mic button and the
-    // notification action, so the relay hears about it too.
-    private var windowManager: WindowManager? = null
-    private var overlayButton: Button? = null
-    private var overlayParams: WindowManager.LayoutParams? = null
-    private var overlayShown = false
-    private var overlayEnabled = false
-    private var gameForegroundNow = false
+    // The linked pack closed (player left the server, game still open):
+    // audio is paused but the session stays, so a rejoin re-links.
+    private var packGone = false
     // Debounce for the mic-flicker bug (v5): the old watcher paused the
     // mic on a single 5s poll where the game looked absent (shade
     // pull-down, app switch, usage-stats lag), so the mic indicator
@@ -101,10 +99,18 @@ class VoiceService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // Load the saved session: without this, a service started by the
+        // boot receiver (or after a process death) would have an empty
+        // name and auto-sense could never connect.
+        val prefs = getSharedPreferences("voicechat", Context.MODE_PRIVATE)
+        savedName = prefs.getString("name", "") ?: ""
+        savedUrl = prefs.getString("url", "") ?: ""
+        savedRange = prefs.getInt("range", 50)
+        autoSenseEnabled = prefs.getBoolean("autosense", true)
+        micPermissionGranted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
         relay = RelayClient(ForwardingListener())
-        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        overlayEnabled = getSharedPreferences("voicechat", Context.MODE_PRIVATE)
-            .getBoolean("overlayEnabled", false)
         createChannel()
         startForeground(NOTIFICATION_ID, buildNotification("VoiceChat idle"))
         startWatcher()
@@ -134,7 +140,12 @@ class VoiceService : Service() {
         savedName = name
         savedUrl = url
         savedRange = range
-        if (!relay.isConnected) relay.connect(url, name, range)
+        // Always (re)connect with the typed name. The old guard
+        // (connect only when disconnected) meant pressing Connect while
+        // an earlier session was alive did nothing: the relay kept the
+        // old name, so a player already inside a server never linked.
+        // RelayClient.connect() disconnects the old socket first.
+        relay.connect(url, name, range)
     }
 
     fun setRange(range: Int) {
@@ -152,20 +163,6 @@ class VoiceService : Service() {
         relay.setMuted(m)
         if (m) stopCapture() else if (micPermissionGranted && !micPausedByGame) startCapture()
         updateNotification()
-        updateOverlayButton()
-    }
-
-    // ---- floating overlay button: public control ----
-
-    fun isOverlayEnabled(): Boolean = overlayEnabled
-
-    fun canDrawOverlay(): Boolean = Settings.canDrawOverlays(this)
-
-    fun setOverlayEnabled(enabled: Boolean) {
-        overlayEnabled = enabled
-        getSharedPreferences("voicechat", Context.MODE_PRIVATE).edit()
-            .putBoolean("overlayEnabled", enabled).apply()
-        refreshOverlay()
     }
 
     fun requestCode() = relay.requestCode()
@@ -174,141 +171,40 @@ class VoiceService : Service() {
     fun groupJoin(name: String, password: String) = relay.groupJoin(name, password)
     fun groupLeave() = relay.groupLeave()
 
-    // ---- game watcher ----
+    // ---- game watcher: auto start / auto stop ----
 
     private val handler = Handler(Looper.getMainLooper())
     private val watcherRunnable = object : Runnable {
         override fun run() {
-            if (!autoSenseEnabled) {
-                // Manual connect: the user chose to be connected, so the
-                // overlay shows whenever connected, no game check.
-                gameForegroundNow = true
-            } else if (savedName.isNotBlank() && savedUrl.isNotBlank() && micPermissionGranted) {
+            if (autoSenseEnabled && savedName.isNotBlank() && savedUrl.isNotBlank() && micPermissionGranted) {
                 if (GameWatcher.isGameForeground(this@VoiceService)) {
                     gameAbsentPolls = 0
-                    gameForegroundNow = true
                     if (!relay.isConnected) relay.connect(savedUrl, savedName, savedRange)
                     if (micPausedByGame) {
                         micPausedByGame = false
                         if (!muted) startCapture()
                     }
                 } else {
-                    // Debounced pause (v5): a single absent poll no longer
-                    // pauses the mic. Only after 3 consecutive absent
+                    // Debounced stop: only after 3 consecutive absent
                     // polls (~15s) do we treat the game as really gone.
-                    // Pause mic only. Connection stays open (see class comment).
+                    // Full stop (disconnect), not just a mic pause: the
+                    // service keeps watching, so re-entering the game
+                    // auto-connects again within seconds.
                     gameAbsentPolls++
                     if (gameAbsentPolls >= 3) {
-                        gameForegroundNow = false
                         if (capturing) {
                             micPausedByGame = true
                             stopCapture()
                         }
+                        if (relay.isConnected) {
+                            relay.disconnect()
+                            updateNotification()
+                        }
                     }
                 }
             }
-            refreshOverlay()
             handler.postDelayed(this, 5_000)
         }
-    }
-
-    // ---- floating overlay button: implementation ----
-
-    private fun dp(value: Int): Int =
-        (value * resources.displayMetrics.density).toInt()
-
-    private fun refreshOverlay() {
-        val shouldShow = overlayEnabled && canDrawOverlay() &&
-            relay.isConnected && gameForegroundNow
-        if (shouldShow) showOverlay() else hideOverlay()
-    }
-
-    private fun showOverlay() {
-        if (overlayShown) {
-            updateOverlayButton()
-            return
-        }
-        val wm = windowManager ?: return
-        val size = dp(72)
-        val btn = Button(this)
-        btn.text = if (muted) "\uD83D\uDD07" else "\uD83C\uDFA4"
-        btn.textSize = 26f
-        btn.setTextColor(Color.WHITE)
-        btn.setBackgroundColor(
-            if (muted) Color.argb(200, 200, 60, 60)
-            else Color.argb(200, 40, 160, 60)
-        )
-        val params = WindowManager.LayoutParams(
-            size, size,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-            PixelFormat.TRANSLUCENT
-        )
-        params.gravity = Gravity.TOP or Gravity.START
-        val dm = resources.displayMetrics
-        params.x = (dm.widthPixels - size) / 2
-        params.y = dm.heightPixels - dp(240)
-        var downX = 0f
-        var downY = 0f
-        var startX = 0
-        var startY = 0
-        var dragged = false
-        btn.setOnTouchListener { _, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    downX = event.rawX
-                    downY = event.rawY
-                    startX = params.x
-                    startY = params.y
-                    dragged = false
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = (event.rawX - downX).toInt()
-                    val dy = (event.rawY - downY).toInt()
-                    if (kotlin.math.abs(dx) > 12 || kotlin.math.abs(dy) > 12) dragged = true
-                    if (dragged) {
-                        params.x = startX + dx
-                        params.y = startY + dy
-                        try { wm.updateViewLayout(btn, params) } catch (_: Exception) { }
-                    }
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    if (!dragged) setMuted(!muted)
-                    true
-                }
-                else -> false
-            }
-        }
-        try {
-            wm.addView(btn, params)
-            overlayButton = btn
-            overlayParams = params
-            overlayShown = true
-        } catch (_: Exception) {
-            overlayShown = false
-        }
-    }
-
-    private fun hideOverlay() {
-        if (!overlayShown) return
-        try {
-            overlayButton?.let { windowManager?.removeView(it) }
-        } catch (_: Exception) { }
-        overlayButton = null
-        overlayParams = null
-        overlayShown = false
-    }
-
-    private fun updateOverlayButton() {
-        val btn = overlayButton ?: return
-        btn.text = if (muted) "\uD83D\uDD07" else "\uD83C\uDFA4"
-        btn.setBackgroundColor(
-            if (muted) Color.argb(200, 200, 60, 60)
-            else Color.argb(200, 40, 160, 60)
-        )
     }
 
     private fun startWatcher() {
@@ -380,7 +276,6 @@ class VoiceService : Service() {
 
     private fun stopAll() {
         handler.removeCallbacks(watcherRunnable)
-        hideOverlay()
         stopCapture()
         try { player?.stop() } catch (_: Exception) { }
         try { player?.release() } catch (_: Exception) { }
@@ -393,7 +288,7 @@ class VoiceService : Service() {
     private fun createChannel() {
         val manager = getSystemService(NotificationManager::class.java)
         val channel = NotificationChannel(
-            CHANNEL_ID, "VoiceChat", NotificationManager.IMPORTANCE_LOW
+            CHANNEL_ID, "ميكروفون ماين كرافت", NotificationManager.IMPORTANCE_LOW
         )
         manager?.createNotificationChannel(channel)
     }
@@ -412,7 +307,7 @@ class VoiceService : Service() {
             android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("VoiceChat")
+            .setContentTitle("ميكروفون ماين كرافت")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
@@ -424,6 +319,7 @@ class VoiceService : Service() {
     private fun updateNotification() {
         val manager = getSystemService(NotificationManager::class.java)
         val text = when {
+            packGone -> "Left server — voice paused"
             muted -> "Muted"
             currentGroup != null -> "In group: $currentGroup"
             relay.isConnected -> "Connected as $savedName"
@@ -438,35 +334,47 @@ class VoiceService : Service() {
         override fun onConnected() {
             ensurePlayer()
             updateNotification()
-            refreshOverlay()
             listener?.onConnected()
         }
 
         override fun onDisconnected() {
             stopCapture()
             updateNotification()
-            refreshOverlay()
             listener?.onDisconnected()
         }
 
         override fun onHelloOk(name: String, proximity: Int) {
+            packGone = false
             if (!muted && micPermissionGranted) startCapture()
             updateNotification()
-            refreshOverlay()
             listener?.onHelloOk(name, proximity)
         }
 
         override fun onCode(code: String) = listener?.onCode(code) ?: Unit
         override fun onVerified(player: String) = listener?.onVerified(player) ?: Unit
         override fun onLinked(player: String) {
+            // Rejoin: the pack is back, resume audio at once.
+            packGone = false
+            ensurePlayer()
+            try { this@VoiceService.player?.play() } catch (_: Exception) { }
+            if (!muted && micPermissionGranted) startCapture()
             updateNotification()
             listener?.onLinked(player) ?: Unit
+        }
+
+        override fun onPackGone() {
+            // Player left the server, game still open: stop audio, keep
+            // the session, so a rejoin re-links and audio resumes.
+            packGone = true
+            stopCapture()
+            try { player?.pause() } catch (_: Exception) { }
+            updateNotification()
+            listener?.onPackGone()
         }
 
         override fun onMuteOk(muted: Boolean) {
             this@VoiceService.muted = muted
             updateNotification()
-            updateOverlayButton()
             listener?.onMuteOk(muted)
         }
 
