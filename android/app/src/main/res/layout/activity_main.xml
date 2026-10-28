@@ -115,6 +115,12 @@
         android:layout_height="wrap_content"
         android:text="إعدادات البطارية (إذا توقفت الخدمة)" />
 
+    <Button
+        android:id="@+id/overlayButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="زر الكتم العائم فوق اللعبة" />
+
     <!-- Mic button, bottom-centre. Tap = mute/unmute, long-press = groups. -->
     <FrameLayout
         android:layout_width="match_parent"
