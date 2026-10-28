@@ -37,10 +37,16 @@ import androidx.core.content.ContextCompat
  *   and start mic capture. This is also how a late Connect works: the
  *   player can already be inside a server, press Connect with his name,
  *   and the relay links him to the pack that is already in the world.
- * - Game absent for 3 consecutive polls (~15 seconds) -> FULL STOP:
- *   mic capture stops and the relay disconnects. The service itself
- *   keeps watching, so re-entering the game auto-connects again within
- *   seconds. A brief alt-tab (under ~15s) does not stop anything.
+ * - Game absent for 3 consecutive polls (~15 seconds) AFTER gameplay
+ *   was seen -> FULL STOP: mic capture stops and the relay
+ *   disconnects. The service itself keeps watching, so re-entering
+ *   the game auto-connects again within seconds. A brief alt-tab
+ *   (under ~15s) does not stop anything.
+ * - Absence is only counted after the game was actually foreground
+ *   (hadGameForeground), and never while this app itself is
+ *   foreground: otherwise merely opening this app — game not
+ *   foreground — would count as "leaving" and kill a connection
+ *   seconds after pressing Connect (the filmed v6 bug).
  * - Pack socket closed (player left the server while the game is still
  *   open) -> the relay sends pack_gone: audio stops, the session stays,
  *   so rejoining the server re-links instantly and audio resumes.
@@ -86,6 +92,12 @@ class VoiceService : Service() {
     // flickered and audio cut in and out. Now the mic only pauses after
     // the game has been absent for 3 consecutive polls (~15 seconds).
     private var gameAbsentPolls = 0
+    // True once the game has been seen in the foreground during this
+    // service lifetime. Auto-stop only counts absence AFTER gameplay:
+    // without this, merely opening this app (game not foreground)
+    // would count as "leaving" and kill a connection seconds after
+    // pressing Connect — the exact bug the player filmed in v6.
+    private var hadGameForeground = false
     var muted: Boolean = false
         private set
     var currentGroup: String? = null
@@ -177,28 +189,39 @@ class VoiceService : Service() {
     private val watcherRunnable = object : Runnable {
         override fun run() {
             if (autoSenseEnabled && savedName.isNotBlank() && savedUrl.isNotBlank() && micPermissionGranted) {
-                if (GameWatcher.isGameForeground(this@VoiceService)) {
-                    gameAbsentPolls = 0
-                    if (!relay.isConnected) relay.connect(savedUrl, savedName, savedRange)
-                    if (micPausedByGame) {
-                        micPausedByGame = false
-                        if (!muted) startCapture()
-                    }
-                } else {
-                    // Debounced stop: only after 3 consecutive absent
-                    // polls (~15s) do we treat the game as really gone.
-                    // Full stop (disconnect), not just a mic pause: the
-                    // service keeps watching, so re-entering the game
-                    // auto-connects again within seconds.
-                    gameAbsentPolls++
-                    if (gameAbsentPolls >= 3) {
-                        if (capturing) {
-                            micPausedByGame = true
-                            stopCapture()
+                when {
+                    GameWatcher.isGameForeground(this@VoiceService) -> {
+                        hadGameForeground = true
+                        gameAbsentPolls = 0
+                        if (!relay.isConnected) relay.connect(savedUrl, savedName, savedRange)
+                        if (micPausedByGame) {
+                            micPausedByGame = false
+                            if (!muted) startCapture()
                         }
-                        if (relay.isConnected) {
-                            relay.disconnect()
-                            updateNotification()
+                    }
+                    GameWatcher.isAppForeground(this@VoiceService) -> {
+                        // User is looking at this app (e.g. just pressed
+                        // Connect): not leaving the game. Pause the
+                        // absence count here — do not disconnect, and
+                        // do not reset the count either.
+                    }
+                    hadGameForeground -> {
+                        // Debounced stop: only after 3 consecutive absent
+                        // polls (~15s) do we treat the game as really gone.
+                        // Full stop (disconnect), not just a mic pause: the
+                        // service keeps watching, so re-entering the game
+                        // auto-connects again within seconds.
+                        gameAbsentPolls++
+                        if (gameAbsentPolls >= 3) {
+                            if (capturing) {
+                                micPausedByGame = true
+                                stopCapture()
+                            }
+                            if (relay.isConnected) {
+                                relay.disconnect()
+                                updateNotification()
+                            }
+                            hadGameForeground = false
                         }
                     }
                 }
