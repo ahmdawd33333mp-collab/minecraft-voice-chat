@@ -123,7 +123,18 @@ function recipientsFor(sender) {
     if (ws === sender.ws) continue;
     if (!s.name) continue;
     if (sender.group) {
-      if (s.group === sender.group) out.push(ws);
+      if (s.group !== sender.group) continue;
+      // Ranged group (set from the /s create panel): members hear
+      // each other only within the group's range. Unlimited groups
+      // (range null) hear each other anywhere, no position needed.
+      const grp = groups.get(sender.group);
+      if (grp && grp.range) {
+        const targetPos = effectivePos(s);
+        if (!senderPos || !targetPos) continue;
+        if (senderPos.dimension !== targetPos.dimension) continue;
+        if (distance(senderPos, targetPos) > grp.range) continue;
+      }
+      out.push(ws);
       continue;
     }
     const targetPos = effectivePos(s);
@@ -253,14 +264,17 @@ const server = Bun.serve({
           leaveCurrent();
           reply({ type: "group_ok", ok: true, group: null });
         } else if (msg.type === "group_create") {
-          const name = s.isPack ? actor.name : String(msg.name || "").slice(0, 32);
+          // From the /s panel the name comes from the form; from
+          // /vgroup create (no name) it defaults to the creator's name.
+          const name = s.isPack ? (String(msg.name || "").slice(0, 32) || actor.name) : String(msg.name || "").slice(0, 32);
+          const range = (msg.range !== undefined && msg.range !== null) ? clampRange(msg.range) : null;
           const existing = name ? groups.get(name) : null;
           if (!name) { reply({ type: "group_ok", ok: false, reason: "exists_or_empty" }); return; }
           if (existing && existing.owner && existing.owner.toLowerCase() !== actor.name.toLowerCase()) { reply({ type: "group_ok", ok: false, reason: "exists_or_empty" }); return; }
           leaveCurrent();
-          groups.set(name, { passwordHash: hashPassword(msg.password || ""), members: new Set([actor.ws]), owner: actor.name });
+          groups.set(name, { passwordHash: hashPassword(msg.password || ""), members: new Set([actor.ws]), owner: actor.name, range });
           actor.group = name; actor.global = false;
-          reply({ type: "group_ok", ok: true, group: name });
+          reply({ type: "group_ok", ok: true, group: name, range });
         } else {
           let g = null, gName = null;
           if (msg.type === "group_join_owner") {
@@ -278,7 +292,7 @@ const server = Bun.serve({
           leaveCurrent();
           g.members.add(actor.ws);
           actor.group = gName; actor.global = false;
-          reply({ type: "group_ok", ok: true, group: gName });
+          reply({ type: "group_ok", ok: true, group: gName, range: g.range ?? null });
         }
       } else if (msg.type === "group_list") {
         send(ws, { type: "groups", groups: [...groups.keys()] });
