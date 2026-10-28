@@ -92,9 +92,9 @@ function stateFor(name) {
 
 // ---- In-game menus (no leaving the game) ----
 // The ONLY menu is /s (groups panel). No /v menu and no /v commands
-// remain — /s covers range, global and groups; /c toggles mute,
-// /cc opens the panel. Mute also stays on the app mic button and
-// its notification actions. (The old Voice Menu item was removed on
+// remain — /s covers range, global and groups; /c mutes, /cc
+// unmutes. Mute also stays on the app mic button and its
+// notification actions. (The old Voice Menu item was removed on
 // the player's order; MENU_ITEM_* below only identify leftovers to
 // clean out of inventories.)
 // ActionForm = button menu, ModalForm = input fields. Both come from
@@ -428,33 +428,33 @@ system.beforeEvents.startup.subscribe((event) => {
     // on the player's order — everything they did lives in the /s
     // panel (range + global toggle under Normal range, groups under
     // Create/Browse), so nothing is lost by removing them.
-    // /c toggles mute, /cc opens the /s panel — short commands the
-    // player asked for, same Any permission, no cheats required.
+    // /c mutes, /cc unmutes ("opens the mic"), /s opens the panel —
+    // explicit commands, no toggle guessing, same Any permission,
+    // no cheats required.
     const cDef = (name) => ({
         name,
-        description: "VoiceChat: mute/unmute your mic",
+        description: "VoiceChat: mute your mic",
         cheatsRequired: false,
         permissionLevel: CommandPermissionLevel.Any,
     });
     const cCb = (origin) => {
         const player = playerOf(origin);
         if (!player) return notPlayer();
-        const target = !mutedNames.has(player.name);
-        if (!sendJson(player.name, { type: "mute", muted: target })) return noRelay();
+        if (!sendJson(player.name, { type: "mute", muted: true })) return noRelay();
         return undefined;
     };
     register("c", cDef("c"), cCb);
     register("voice:c", cDef("voice:c"), cCb);
     const ccDef = (name) => ({
         name,
-        description: "VoiceChat: open the groups panel",
+        description: "VoiceChat: unmute your mic",
         cheatsRequired: false,
         permissionLevel: CommandPermissionLevel.Any,
     });
     const ccCb = (origin) => {
         const player = playerOf(origin);
         if (!player) return notPlayer();
-        openGroupsMenu(player);
+        if (!sendJson(player.name, { type: "mute", muted: false })) return noRelay();
         return undefined;
     };
     register("cc", ccDef("cc"), ccCb);
