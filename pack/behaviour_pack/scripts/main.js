@@ -476,7 +476,11 @@ system.beforeEvents.startup.subscribe((event) => {
     const sCb = (origin) => {
         const player = playerOf(origin);
         if (!player) return notPlayer();
-        openGroupsMenu(player);
+        // Command callbacks run in a "before" context where opening a
+        // form can fail silently, so defer the panel to the next tick
+        // (system.run), where forms are allowed. Without this the
+        // panel never appears even when the command itself executes.
+        system.run(() => { openGroupsMenu(player); });
         return undefined;
     };
     register("s", sDef("s"), sCb);
