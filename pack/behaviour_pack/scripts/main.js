@@ -145,6 +145,7 @@ async function openGroupsMenu(player) {
     form.body("Create a group, or browse existing groups and join one.");
     form.button("Create group");
     form.button("Browse groups");
+    form.button("Normal range (blocks)");
     let res;
     try {
         res = await form.show(player);
@@ -157,16 +158,18 @@ async function openGroupsMenu(player) {
         sendJson(player.name, { type: "group_list" });
         return;
     }
+    if (res.selection === 2) return openRangeForm(player);
 }
 
+// Groups are ALWAYS unlimited: members hear each other wherever
+// they are. No range field here by design — the normal-mode range
+// (a free number, not presets) lives in the Range form instead.
 async function openCreateGroupPanel(player) {
     if (!ModalFormData) return;
     const form = new ModalFormData();
     form.title("VoiceChat: create group");
     form.textField("Group name", "e.g. friends");
     form.textField("Password", "password others must enter");
-    form.textField("Hearing range in blocks", "e.g. 100 (ignored if Unlimited is on)");
-    form.toggle("Unlimited — members hear each other anywhere", true);
     let res;
     try {
         res = await form.show(player);
@@ -174,21 +177,12 @@ async function openCreateGroupPanel(player) {
         return;
     }
     if (res.canceled) return;
-    const [name, pw, rangeText, unlimited] = res.formValues;
+    const [name, pw] = res.formValues;
     if (!name || !pw) {
         player.sendMessage("VoiceChat: enter a group name and a password.");
         return;
     }
-    const msg = { type: "group_create", name, password: pw };
-    if (!unlimited) {
-        const n = Math.floor(Number(rangeText));
-        if (!Number.isFinite(n) || n < 1) {
-            player.sendMessage("VoiceChat: enter hearing blocks, or turn Unlimited on.");
-            return;
-        }
-        msg.range = Math.min(2000, n);
-    }
-    sendJson(player.name, msg);
+    sendJson(player.name, { type: "group_create", name, password: pw });
 }
 
 async function openGroupListForm(player, names) {
