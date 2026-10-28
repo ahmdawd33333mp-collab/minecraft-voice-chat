@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.content.SharedPreferences
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
@@ -56,6 +57,7 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
     private lateinit var commandSection: LinearLayout
     private lateinit var commandText: TextView
     private lateinit var micButton: Button
+    private lateinit var overlayButton: Button
     private lateinit var autoSenseSwitch: Switch
     private lateinit var rangeSpinner: Spinner
 
@@ -90,6 +92,7 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
         commandSection = findViewById(R.id.commandSection)
         commandText = findViewById(R.id.commandText)
         micButton = findViewById(R.id.micButton)
+        overlayButton = findViewById(R.id.overlayButton)
         autoSenseSwitch = findViewById(R.id.autoSenseSwitch)
         rangeSpinner = findViewById(R.id.rangeSpinner)
 
@@ -119,6 +122,7 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
         findViewById<Button>(R.id.copyButton).visibility = View.GONE
         findViewById<Button>(R.id.permissionsButton).setOnClickListener { explainAndRequestPermissions() }
         findViewById<Button>(R.id.batteryButton).setOnClickListener { openBatterySettings() }
+        overlayButton.setOnClickListener { onOverlayClicked() }
         autoSenseSwitch.setOnCheckedChangeListener { _, checked ->
             VoiceService.autoSenseEnabled = checked
             prefs.edit().putBoolean("autosense", checked).apply()
@@ -148,6 +152,7 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
         VoiceService.listener = this
         VoiceService.micPermissionGranted = hasMicPermission()
         refreshMicButton()
+        refreshOverlayButton()
     }
 
     override fun onPause() {
@@ -225,6 +230,52 @@ class MainActivity : AppCompatActivity(), RelayClient.Listener {
 
     private fun openBatterySettings() {
         startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+    }
+
+    // ---- floating mute button over Minecraft ----
+    // Bedrock HUD buttons cannot run anything or reach this app, so the
+    // real button is this app's system overlay: it appears over the game
+    // (bottom-centre, draggable) while connected, and a tap toggles the
+    // mic through the service, exactly like the mic button here.
+
+    private fun onOverlayClicked() {
+        val svc = service
+        if (svc == null) {
+            Toast.makeText(this, "الخدمة لسا ما اشتغلت — انتظر ثانية وحاول", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (!Settings.canDrawOverlays(this)) {
+            Toast.makeText(
+                this,
+                "افتح إذن «العرض فوق التطبيقات الأخرى» لـ VoiceChat، وبعدها ارجع وكبس الزر من جديد",
+                Toast.LENGTH_LONG
+            ).show()
+            val intent = Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:$packageName")
+            )
+            startActivity(intent)
+            return
+        }
+        val newState = !svc.isOverlayEnabled()
+        svc.setOverlayEnabled(newState)
+        Toast.makeText(
+            this,
+            if (newState) "تم تفعيل الزر العائم — بيظهر فوق اللعبة لما تتصل"
+            else "تم إيقاف الزر العائم",
+            Toast.LENGTH_SHORT
+        ).show()
+        refreshOverlayButton()
+    }
+
+    private fun refreshOverlayButton() {
+        runOnUiThread {
+            val svc = service
+            overlayButton.text = if (svc?.isOverlayEnabled() == true)
+                "زر الكتم العائم: شغال (اضغط للإيقاف)"
+            else
+                "زر الكتم العائم فوق اللعبة"
+        }
     }
 
     // ---- groups: long-press on the mic button ----
