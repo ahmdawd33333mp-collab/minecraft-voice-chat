@@ -1,4 +1,7 @@
 // VoiceChat Behaviour Pack — pilot v4
+// v16: mute/unmute relay sends deferred via system.run — direct sends
+// from command callbacks throw "restricted execution" (Bedrock forbids
+// network sends in a "before" context), so the relay never got mutes.
 // Bedrock 1.26.x, Beta APIs, BDS only. @minecraft/server-net is
 // pre-release and only works on Bedrock Dedicated Server, not on the
 // game client and not on Realms.
@@ -468,7 +471,17 @@ system.beforeEvents.startup.subscribe((event) => {
     const muteCb = (origin) => {
         const player = playerOf(origin);
         if (!player) return notPlayer();
-        if (!sendJson(player.name, { type: "mute", muted: true })) return noRelay();
+        // v16: command callbacks run in a "before" context where
+        // network sends are FORBIDDEN ("restricted execution") — the
+        // direct sendJson here threw and the relay never got the mute,
+        // which is why /voice:ahmdf showed the red "relay is not
+        // connected" message even with a live socket. Defer the send
+        // to the next tick (the v13 panel pattern), where it is allowed.
+        system.run(() => {
+            try {
+                if (!sendJson(player.name, { type: "mute", muted: true })) player.sendMessage("VoiceChat: relay is not connected — try again in a few seconds.");
+            } catch { /* player left within the tick */ }
+        });
         return undefined;
     };
     register("voice:ahmdf", muteDef("voice:ahmdf"), muteCb);
@@ -481,7 +494,12 @@ system.beforeEvents.startup.subscribe((event) => {
     const unmuteCb = (origin) => {
         const player = playerOf(origin);
         if (!player) return notPlayer();
-        if (!sendJson(player.name, { type: "mute", muted: false })) return noRelay();
+        // v16: same restricted-execution deferral as muteCb above.
+        system.run(() => {
+            try {
+                if (!sendJson(player.name, { type: "mute", muted: false })) player.sendMessage("VoiceChat: relay is not connected — try again in a few seconds.");
+            } catch { /* player left within the tick */ }
+        });
         return undefined;
     };
     register("voice:ahmdn", unmuteDef("voice:ahmdn"), unmuteCb);
