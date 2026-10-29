@@ -165,7 +165,11 @@ class VoiceService : Service() {
     private val playoutQueue = LinkedBlockingQueue<AudioChunk>()
     private var playoutThread: Thread? = null
     @Volatile private var playoutRunning = false
-    @Volatile private var playoutPaused = false
+    // v15: start SILENT. A fresh install used to play any frame the
+    // relay routed to it before the first pack link (global frames
+    // reach every named session), so opening the app alone let a
+    // friend's voice through. Now nothing plays until onLinked.
+    @Volatile private var playoutPaused = true
     private var lastChunk: AudioChunk? = null
     @Volatile private var capturing: Boolean = false
     @Volatile private var micPausedByGame: Boolean = false
@@ -217,6 +221,15 @@ class VoiceService : Service() {
         createChannel()
         startForeground(NOTIFICATION_ID, buildNotification("VoiceChat idle"))
         startWatcher()
+        // v15: reconnect from saved prefs whenever the service is
+        // (re)created — boot, or a START_STICKY restart after the
+        // system killed the process. Before this, background voice
+        // died with the process and only came back when the app was
+        // opened again. Audio and mic stay gated on the pack link,
+        // so an idle connection plays and sends nothing.
+        if (savedName.isNotBlank() && savedUrl.isNotBlank()) {
+            relay.connect(savedUrl, savedName, savedRange)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -457,8 +470,11 @@ class VoiceService : Service() {
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
             var repeatCount = 0
             while (playoutRunning) {
-                if (playoutPaused) {
-                    // Left the server: drop incoming audio, keep polling.
+                if (playoutPaused || !appLinked) {
+                    // Not linked inside the server yet (fresh start,
+                    // socket drop, or left the server): drop incoming
+                    // audio, keep polling. The mic is link-gated too,
+                    // so voice works ONLY while linked in-game.
                     try { playoutQueue.poll(50, TimeUnit.MILLISECONDS) } catch (_: Exception) { }
                     continue
                 }
