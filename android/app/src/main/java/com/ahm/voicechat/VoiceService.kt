@@ -14,6 +14,9 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import android.media.MediaRecorder
 import android.os.Binder
 import android.os.Handler
@@ -140,6 +143,12 @@ class VoiceService : Service() {
     private val binder = LocalBinder()
     private lateinit var relay: RelayClient
     private var recorder: AudioRecord? = null
+    // v14 voice filter: platform echo canceller + noise suppressor +
+    // gain control, attached to the capture session. Released in
+    // stopCapture(). Null when the device does not offer an effect.
+    private var echoCanceler: AcousticEchoCanceler? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
+    private var gainControl: AutomaticGainControl? = null
     private var player: AudioTrack? = null
     private var amrPlayer: AudioTrack? = null
     private var amrEncoder: AmrEncoder? = null
@@ -343,7 +352,10 @@ class VoiceService : Service() {
             return
         }
         val rec = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
+            // v14: VOICE_COMMUNICATION (not raw MIC) so the platform
+            // voice effects below actually attach. Playback is
+            // untouched (v12 media path), so no game-lag return.
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
             rate, channelIn, encoding, minBuf * 2
         )
         if (rec.state != AudioRecord.STATE_INITIALIZED) {
@@ -352,6 +364,27 @@ class VoiceService : Service() {
         }
         recorder = rec
         amrEncoder = encoder
+        // v14 voice filter: kill the whistle (echo of the other
+        // phone's speaker picked up again by the mic), cut background
+        // noise, and lift a quiet mic. Human voice passes through;
+        // the filter runs on the SENDER's phone, so both phones need
+        // v14 for both directions. Every effect is guarded: if the
+        // device does not offer it, capture works exactly as before.
+        try {
+            if (AcousticEchoCanceler.isAvailable()) {
+                echoCanceler = AcousticEchoCanceler.create(rec.audioSessionId)?.apply { enabled = true }
+            }
+        } catch (_: Exception) { echoCanceler = null }
+        try {
+            if (NoiseSuppressor.isAvailable()) {
+                noiseSuppressor = NoiseSuppressor.create(rec.audioSessionId)?.apply { enabled = true }
+            }
+        } catch (_: Exception) { noiseSuppressor = null }
+        try {
+            if (AutomaticGainControl.isAvailable()) {
+                gainControl = AutomaticGainControl.create(rec.audioSessionId)?.apply { enabled = true }
+            }
+        } catch (_: Exception) { gainControl = null }
         capturing = true
         rec.startRecording()
         captureThread = Thread {
@@ -387,6 +420,13 @@ class VoiceService : Service() {
         try { captureThread?.join(500) } catch (_: Exception) { }
         captureThread = null
         try { recorder?.stop() } catch (_: Exception) { }
+        // v14: release the voice-filter effects with the session.
+        try { echoCanceler?.release() } catch (_: Exception) { }
+        echoCanceler = null
+        try { noiseSuppressor?.release() } catch (_: Exception) { }
+        noiseSuppressor = null
+        try { gainControl?.release() } catch (_: Exception) { }
+        gainControl = null
         try { recorder?.release() } catch (_: Exception) { }
         recorder = null
         amrEncoder?.release()
