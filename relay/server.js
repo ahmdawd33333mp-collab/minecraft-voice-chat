@@ -15,6 +15,11 @@
 //  4. Otherwise -> only players in the same dimension within the SENDER's
 //     chosen range receive (range is per app session, default 15, the app
 //     lets the player pick 20/30/50/100/200/500/1000/2000).
+//  5. Deafened receiver -> no audio frames (speaking notices still
+//     flow, so nametags stay truthful). Deafen is INDEPENDENT of mute:
+//     a deafened player still SENDS if their mic is ON — the two panel
+//     buttons are separate ON/OFF switches (mic = what others hear,
+//     hear = what you hear).
 // In-game /v commands and the Voice Menu send range/global/group on the
 // PACK socket; the relay applies them to the LINKED APP session (the
 // audio sender) or keeps them pending until the app links. Groups made
@@ -73,7 +78,9 @@ function tryAutoLink(s) {
     send(app.ws, { type: "linked", player: pack.name });
     // v19: pack memory resets on server restart, relay state does
     // not — sync the real group/range/global so the panel is truthful.
-    send(pack.ws, { type: "state_sync", group: app.group || null, range: app.range, global: app.global });
+    // v24: also sync deafened (hear switch) for the same reason.
+    if (pack.pendingDeafen !== undefined) { app.deafened = pack.pendingDeafen; pack.pendingDeafen = undefined; }
+    send(pack.ws, { type: "state_sync", group: app.group || null, range: app.range, global: app.global, deafened: app.deafened || false });
     return;
   }
 }
@@ -162,7 +169,7 @@ const server = Bun.serve({
   },
   websocket: {
     open(ws) {
-      clients.set(ws, { ws, name: null, player: null, pos: null, muted: false, group: null, global: false, appWs: null, packWs: null, isPack: false, range: DEFAULT_PROXIMITY, pendingRange: undefined, pendingGlobal: undefined });
+      clients.set(ws, { ws, name: null, player: null, pos: null, muted: false, deafened: false, group: null, global: false, appWs: null, packWs: null, isPack: false, range: DEFAULT_PROXIMITY, pendingRange: undefined, pendingGlobal: undefined, pendingDeafen: undefined });
     },
     message(ws, message) {
       const s = clients.get(ws);
@@ -177,6 +184,11 @@ const server = Bun.serve({
         const targets = recipientsFor(s);
         for (const t of targets) {
           try { t.send(JSON.stringify({ type: "speaking", from: s.name, speaking: true })); } catch {}
+          // v24: a deafened APP session hears nothing — skip its audio
+          // frame (its pack socket still gets the speaking notice above,
+          // and pack sockets ignore binary frames anyway).
+          const ts = clients.get(t);
+          if (ts && !ts.isPack && ts.deafened) continue;
           try { t.send(message); } catch {}
         }
         return;
@@ -264,6 +276,23 @@ const server = Bun.serve({
         // can clear the moment this player mutes (not just on timeout).
         const packWs = target.packWs && clients.get(target.packWs) ? target.packWs : null;
         if (packWs && packWs !== ws) send(packWs, { type: "mute", player: target.name, muted: target.muted });
+      } else if (msg.type === "deafen") {
+        // v24: mirror of mute, receiver-side. A deafen from a linked
+        // pack socket (panel hear button) deafens the LINKED APP
+        // session — the app is the audio receiver, so the pack
+        // session's own flag would never gate anything. Unlinked pack
+        // commands are kept as pending and applied at link time.
+        const on = Boolean(msg.deafened);
+        if (s.isPack) {
+          const app = s.appWs && clients.get(s.appWs);
+          if (app) { app.deafened = on; send(app.ws, { type: "deafen_ok", deafened: on }); send(ws, { type: "deafen_ok", deafened: on }); }
+          else { s.pendingDeafen = on; send(ws, { type: "deafen_ok", deafened: on }); }
+        } else {
+          s.deafened = on;
+          send(ws, { type: "deafen_ok", deafened: on });
+          const packWs = s.packWs && clients.get(s.packWs);
+          if (packWs) send(packWs.ws, { type: "deafen", player: s.name, deafened: on });
+        }
       } else if (msg.type === "group_create" || msg.type === "group_join" || msg.type === "group_join_owner" || msg.type === "group_leave") {
         // Group ops from a pack socket act on the LINKED APP session
         // (the audio sender). A group created in game is named after
