@@ -79,8 +79,10 @@ function tryAutoLink(s) {
     // v19: pack memory resets on server restart, relay state does
     // not — sync the real group/range/global so the panel is truthful.
     // v24: also sync deafened (hear switch) for the same reason.
+    // v25: also sync muted — without it the panel showed ON on rejoin
+    // while the relay still held muted=true from last time.
     if (pack.pendingDeafen !== undefined) { app.deafened = pack.pendingDeafen; pack.pendingDeafen = undefined; }
-    send(pack.ws, { type: "state_sync", group: app.group || null, range: app.range, global: app.global, deafened: app.deafened || false });
+    send(pack.ws, { type: "state_sync", group: app.group || null, range: app.range, global: app.global, deafened: app.deafened || false, muted: app.muted || false });
     return;
   }
 }
